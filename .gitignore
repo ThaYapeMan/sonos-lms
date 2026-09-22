@@ -1,0 +1,9 @@
+*.o
+/sonos-squeezebox
+attic
+*.sh
+
+/encoder-test
+
+/resume-state-test
+/streamer-test
