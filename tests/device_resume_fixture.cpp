@@ -2,16 +2,19 @@
 #include "stop_debounce.h"
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
+#include <future>
 #include <mutex>
 #include <string>
+#include <thread>
 
 static std::atomic<bool> ourStreamStarted{true}, lmsPaused{false};
 static std::atomic<unsigned> streamId{6}, lmsStreamSerial{0}, completedStream{6};
 static std::mutex resumeMutex, stopMutex, transportMutex;
 static ResumeState resumeState;
 static StopDebounce deferredStop;
-static bool stream_just_restarted() { return false; }
+static bool stream_just_restarted() { return streamId.load() != completedStream.load(); }
 static bool responseOpen = false, responseEnded = false;
 static unsigned cliPlays = 0, streamPlays = 0, transportPlays = 0;
 struct Transport { std::string TransportState, TransportStatus; };
@@ -110,7 +113,7 @@ int main() {
     assert(cliPlays == 1);
     sonos_lms_transport('u');
     assert(responseOpen && !lmsPaused && !responseEnded);
-    assert(streamPlays == 0 && transportPlays == 0);
+    assert(streamPlays == 0 && transportPlays == 1);
     puts("PASS: open GET owns device resume and strm u feeds it without PlayStream");
 
     paused("ERROR_NO_RESOURCE");
@@ -120,6 +123,7 @@ int main() {
     responseOpen = true; // GET arrives before the asynchronous LMS strm u
     sonos_lms_transport('u');
     assert(streamPlays == 0 && responseOpen && !lmsPaused);
+    assert(transportPlays == 1);
     puts("PASS: GET arriving after status resume but before strm u is fed without PlayStream");
 
     paused("ERROR_NO_RESOURCE");
@@ -131,4 +135,37 @@ int main() {
     sonos_lms_transport('u');
     assert(streamPlays == 1 && !lmsPaused);
     puts("PASS: GET closed before strm u re-primes instead of feeding a missing response");
+
+    paused("ERROR_NO_RESOURCE");
+    responseOpen = true;
+    std::promise<void> locked, release;
+    auto released = release.get_future();
+    std::thread owner([&] {
+        std::lock_guard<std::mutex> lock(transportMutex);
+        locked.set_value();
+        released.wait();
+    });
+    locked.get_future().wait();
+    auto unpause = std::async(std::launch::async, [] { sonos_lms_transport('u'); });
+    // Must finish while another thread still owns transportMutex.
+    assert(unpause.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    unpause.get();
+    assert(transportPlays == 0 && streamPlays == 0);
+    assert(responseOpen && !lmsPaused && !responseEnded);
+    release.set_value();
+    owner.join();
+    refreshStatus(snapshot);
+    assert(transportPlays == 0 && streamPlays == 0);
+    puts("PASS: busy transport mutex skips held-GET Play acknowledgement without waiting or retrying");
+
+    paused("ERROR_NO_RESOURCE");
+    responseOpen = true;
+    completedStream = 5; // stream 6 is still restarting
+    sonos_lms_transport('u');
+    assert(transportPlays == 0 && streamPlays == 0);
+    assert(responseOpen && !lmsPaused && !responseEnded);
+    completedStream = 6;
+    refreshStatus(snapshot);
+    assert(transportPlays == 0 && streamPlays == 0);
+    puts("PASS: stream restart skips held-GET Play acknowledgement without retrying afterward");
 }
