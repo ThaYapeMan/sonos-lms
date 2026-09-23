@@ -15,6 +15,17 @@ int main() {
         seek.command('p');
         assert(seek.command('u') == Unpause::SameURL);
     }
+    for (bool responseOpen : {false, true}) {
+        ResumeState started;
+        started.command('p');
+        started.command('q');
+        started.command('s');
+        started.streamStarted(); // track boundary, without an intervening strm u
+        started.command('p'); // unrelated pause of the established stream
+        assert(started.command('u', responseOpen)
+            == (responseOpen ? Unpause::FeedHeldGet : Unpause::SameURL));
+    }
+    std::cout << "PASS: started p/q/s stream clears pending intent before a later resume, with or without a GET\n";
     ResumeState held;
     held.command('p');
     assert(held.command('u', true) == Unpause::FeedHeldGet);

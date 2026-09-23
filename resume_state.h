@@ -60,6 +60,8 @@ public:
         return true;
     }
 
+    void streamStarted() { newStreamPending = false; }
+
     void retryResume() { requested = false; }
 
 private:

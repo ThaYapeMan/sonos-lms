@@ -82,6 +82,10 @@ extern "C" unsigned get_squeezebox_stream_id(void) { return streamId.load(); }
 extern "C" void new_squeezebox_stream_id(void)
 {
     unsigned id = streamId.fetch_add(1) + 1;
+    {
+        std::lock_guard<std::mutex> lock(resumeMutex);
+        resumeState.streamStarted();
+    }
     printf("Creating new stream (%u) for Sonos\n", id);
 }
 
