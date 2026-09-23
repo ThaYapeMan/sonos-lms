@@ -15,9 +15,10 @@
 #include "data/datareader.h"
 #include "imageservice.h"
 #include "private/tokenizer.h"
-#include "private/urlencoder.h"
+#include "private/uriencoder.h"
 #include "requestbroker.h"
-#include "private/requestbrokeropaque.h"
+#include "private/wsrequestbroker.h"
+#include "private/wsrequestreply.h"
 #include "private/socket.h"
 #include <sys/socket.h>
 #include "sbencoder.h"
@@ -145,22 +146,22 @@ bool SBStreamer::HandleRequest(handle* handle)
     if (IsAborted())
         return false;
 
-    const std::string& requestUri = RequestBroker::GetRequestURI(handle);
+    const std::string& requestUri = handle->broker->GetRequestPath();
     if (requestUri.compare(0, strlen(SBSTREAMER_URI), SBSTREAMER_URI) != 0)
         return false;
 
-    switch (RequestBroker::GetRequestMethod(handle)) {
-    case RequestBroker::Method_GET: {
+    switch (handle->broker->GetRequestMethod()) {
+    case WS_METHOD_Get: {
         std::vector<std::string> params;
-        readParameters(requestUri, params);
+        tokenize(handle->broker->GetURIParams(), "&", "", params, true);
         int stream = atoi(getParamValue(params, "stream").c_str());
         streamSqueezeBox(handle, stream);
         return true;
     }
-    case RequestBroker::Method_HEAD: {
-        std::string response = std::string(RequestBroker::MakeResponseHeader(RequestBroker::Status_OK))
-            + "Content-Type: audio/flac\r\n\r\n";
-        RequestBroker::Reply(handle, response.c_str(), response.length());
+    case WS_METHOD_Head: {
+        WSRequestReply reply(*handle->broker);
+        reply.AddHeader(WS_HEADER_Content_Type, SBSTREAMER_CONTENT);
+        reply.PostReply(WS_STATUS_200_OK);
         return true;
     }
     default:
@@ -196,14 +197,15 @@ void SBStreamer::UnregisterResource(const std::string& uri)
     (void)uri;
 }
 
-// Send one HTTP chunk: hex-size CRLF data CRLF
+// Send one HTTP chunk immediately: hex-size CRLF data CRLF.
+// WSRequestReply buffers blocks until its chunk buffer fills; that delays audio.
 bool SBStreamer::sendChunk(handle* h, const char* data, size_t size)
 {
     char hdr[16];
     int hlen = snprintf(hdr, sizeof(hdr), "%x\r\n", (unsigned)size);
-    return RequestBroker::Reply(h, hdr, hlen)
-        && RequestBroker::Reply(h, data, size)
-        && RequestBroker::Reply(h, "\r\n", 2);
+    return h->broker->ReplyData(hdr, hlen)
+        && h->broker->ReplyData(data, size)
+        && h->broker->ReplyData("\r\n", 2);
 }
 
 void SBStreamer::streamSqueezeBox(handle* handle, int stream)
@@ -212,11 +214,11 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
     // Bound a stalled peer as well as a stalled PCM producer. noson SendData
     // uses the socket directly, so SetTimeout (receive only) is insufficient.
     timeval sendTimeout{0, 500000};
-    setsockopt(handle->payload->socket->GetHandle(), SOL_SOCKET, SO_SNDTIMEO,
+    setsockopt(handle->broker->Socket()->GetHandle(), SOL_SOCKET, SO_SNDTIMEO,
                &sendTimeout, sizeof(sendTimeout));
 
     auto peerClosed = [handle] {
-        auto socket = handle->payload->socket;
+        auto socket = handle->broker->Socket();
         if (!socket->IsValid()) return true;
         if (socket->GetHandle() < 0) return false; // in-memory test socket
         char byte;
@@ -233,10 +235,11 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
     // normal probe/second GET and either kind of resume) NEVER change the ID.
     if ((unsigned)stream < current) {
         std::string url = SqueezeBoxURL(current);
+        // Preserve the existing reason phrase (noson uses "Moved temporarily").
         std::string redirect = "HTTP/1.1 302 Found\r\nLocation: " + url
             + "\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
         printf("stream %d: HTTP 302 -> %s\n", stream, url.c_str());
-        RequestBroker::Reply(handle, redirect.c_str(), redirect.size());
+        handle->broker->ReplyData(redirect.c_str(), redirect.size());
         return;
     }
 
@@ -285,22 +288,21 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
         if (r < 4 || memcmp(buf, "fLaC", 4) != 0) {
             printf("stream %d: no audio before timeout or connection replaced\n", stream);
             std::string error = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            RequestBroker::Reply(handle, error.c_str(), error.size());
+            handle->broker->ReplyData(error.c_str(), error.size());
         } else {
-            std::string resp = RequestBroker::MakeResponseHeader(RequestBroker::Status_OK)
-                + "Content-Type: audio/flac\r\nTransfer-Encoding: chunked\r\n\r\n";
+            std::string resp = "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nTransfer-Encoding: chunked\r\n\r\n";
             printf("stream %d: serving current generation with fresh FLAC header\n", stream);
-            if (RequestBroker::Reply(handle, resp.c_str(), resp.size()) && sendChunk(handle, buf, r)) {
+            if (handle->broker->ReplyData(resp.c_str(), resp.size()) && sendChunk(handle, buf, r)) {
                 while (!IsAborted() && (r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed)) > 0) {
                     if (!sendChunk(handle, buf, r)) break;
                 }
-                RequestBroker::Reply(handle, "0\r\n\r\n", 5);
+                handle->broker->ReplyData("0\r\n\r\n", 5);
             }
         }
         if (peerClosed()) printf("stream %d: client closed connection\n", stream);
         // EOF above must precede socket close. Keep a paused encoder alive;
         // the next same-ID request cancels/replaces it, with a fresh FLAC header.
-        handle->payload->socket->Disconnect();
+        handle->broker->Socket()->Disconnect();
         if (!enc->responseEnded()) {
             enc->cancel();
             {
@@ -318,21 +320,14 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
 
 void SBStreamer::Reply400(handle* handle)
 {
-    std::string response = std::string(RequestBroker::MakeResponseHeader(RequestBroker::Status_Bad_Request)) + "\r\n";
-    RequestBroker::Reply(handle, response.c_str(), response.length());
+    WSRequestReply reply(*handle->broker);
+    reply.PostReply(WS_STATUS_400_Bad_Request);
 }
 
 void SBStreamer::Reply429(handle* handle)
 {
-    std::string response = std::string(RequestBroker::MakeResponseHeader(RequestBroker::Status_Too_Many_Requests)) + "\r\n";
-    RequestBroker::Reply(handle, response.c_str(), response.length());
-}
-
-void SBStreamer::readParameters(const std::string& streamUrl, std::vector<std::string>& params)
-{
-    size_t queryStart = streamUrl.find('?');
-    if (queryStart != std::string::npos)
-        tokenize(streamUrl.substr(queryStart + 1), "&", params, true);
+    WSRequestReply reply(*handle->broker);
+    reply.PostReply(WS_STATUS_429_Too_Many_Requests);
 }
 
 std::string SBStreamer::getParamValue(const std::vector<std::string>& params, const std::string& name)

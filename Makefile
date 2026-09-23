@@ -20,7 +20,7 @@ OBJS_SL = squeezelite.o \
 
 all: sonos-squeezebox
 
-noson/noson/libnoson.a:
+noson/noson/libnoson.a: noson/CMakeLists.txt noson/noson/CMakeLists.txt
 	cmake -D CMAKE_POLICY_VERSION_MINIMUM=3.5 -D CMAKE_BUILD_TYPE=Release -S noson -B noson
 	make -C noson
 

@@ -49,7 +49,6 @@ private:
     void Reply400(handle* handle);
     void Reply429(handle* handle);
 
-    void readParameters(const std::string& streamUrl, std::vector<std::string>& params);
     std::string getParamValue(const std::vector<std::string>& params, const std::string& name);
 };
 

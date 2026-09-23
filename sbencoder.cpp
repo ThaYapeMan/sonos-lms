@@ -17,7 +17,7 @@
 #include <cstring>
 #include <unistd.h>
 
-#include "framebuffer.h"
+#include "private/ringbuffer.h"
 #include "private/byteorder.h"
 
 namespace {
@@ -44,17 +44,17 @@ FLAC__int32 nextSampleAsInt32(const char*& cursor, int bitDepth)
         return v;
     }
     case 16: {
-        FLAC__int32 v = read16le(cursor);
+        FLAC__int32 v = read_b16le(cursor);
         cursor += 2;
         return v;
     }
     case 24: {
-        FLAC__int32 v = read24le(cursor);
+        FLAC__int32 v = read_b24le(cursor);
         cursor += 3;
         return v;
     }
     case 32: {
-        FLAC__int32 v = read32le(cursor);
+        FLAC__int32 v = read_b32le(cursor);
         cursor += 4;
         return v;
     }
@@ -85,7 +85,7 @@ SBEncoder::SBEncoder(unsigned streamId)
     , m_pendingPacketConsumed(0)
     , m_flac(nullptr)
 {
-    m_encodedRing = new FrameBuffer(kEncodedRingCapacity);
+    m_encodedRing = new RingBuffer(kEncodedRingCapacity);
     m_flac = new WriteBridge(this);
 }
 

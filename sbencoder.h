@@ -25,8 +25,8 @@
 
 namespace NSROOT {
 
-class FrameBuffer;
-class FramePacket;
+class RingBuffer;
+class RingBufferPacket;
 
 // Bridges squeezelite's decoded PCM (pushed via write()) to the HTTP
 // streamer's FLAC output (pulled via read()), pacing writes against actual
@@ -102,8 +102,8 @@ private:
     unsigned m_streamId;
     FLAC__int32* m_interleaveBuf;
 
-    FrameBuffer* m_encodedRing;
-    FramePacket* m_pendingPacket;
+    RingBuffer* m_encodedRing;
+    RingBufferPacket* m_pendingPacket;
     int m_pendingPacketConsumed;
 
     class WriteBridge : public FLAC::Encoder::Stream {

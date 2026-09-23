@@ -2,7 +2,6 @@
 #include "resume_state.h"
 #include "private/socket.h"
 #include "private/wsrequestbroker.h"
-#include "private/requestbrokeropaque.h"
 #include <FLAC++/decoder.h>
 #include <atomic>
 #include <cassert>
@@ -120,10 +119,9 @@ private:
 };
 
 static void serve(SBStreamer& broker, Socket& socket) {
-    WSRequestBroker request(&socket, timeval{1, 0});
+    WSRequestBroker request(&socket, /*secure=*/false, /*timeout ms=*/1000);
     assert(request.IsParsed());
-    RequestBroker::opaque payload{&socket, &request};
-    RequestBroker::handle handle{nullptr, &payload};
+    RequestBroker::handle handle{nullptr, &request};
     assert(broker.HandleRequest(&handle));
 }
 static void feed(int first) {
