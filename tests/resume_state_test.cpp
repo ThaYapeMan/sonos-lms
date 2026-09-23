@@ -22,7 +22,7 @@ int main() {
     held.observe("PAUSED_PLAYBACK"); held.command('p');
     held.observe("TRANSITIONING");
     assert(held.takeResume(1, 1));
-    assert(held.command('u') == Unpause::FeedHeldGet);
+    assert(held.command('u', true) == Unpause::FeedHeldGet); // held GET is actually open
     held.command('p');
     assert(held.command('u') == Unpause::SameURL);
     ResumeState playingSeek;

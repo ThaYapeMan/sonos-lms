@@ -52,6 +52,7 @@ test: encoder-test resume-state-test streamer-test
 	./encoder-test
 	./resume-state-test
 	./streamer-test
+	python3 tests/device_resume_test.py
 
 sbstreamer.o sbencoder.o: sbencoder.h
 

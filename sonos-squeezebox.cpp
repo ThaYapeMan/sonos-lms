@@ -575,10 +575,9 @@ void refreshStatus(SONOS::Status& status)
 
     if (ourStreamStarted.load() && !stream_just_restarted()) {
         ObserveDeviceTransport(transportState);
-        // An errored device may never issue GET. Its observed resume still
-        // relays LMS play. Its strm u follows the same exclusive resume
-        // decision as the HTTP callback, without a second device command.
-        if (gPlayer->GetTransportProperty().TransportStatus == "ERROR_LOST_CONNECTION")
+        // Without a live GET, relay the observed device resume here. With
+        // a live GET, its HTTP worker owns the same exclusive resume decision.
+        if (!squeezebox_response_open(streamId.load()))
             ResumeSqueezeBox(streamId.load());
     }
 

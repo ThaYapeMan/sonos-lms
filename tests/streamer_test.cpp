@@ -156,6 +156,9 @@ int main() {
     Socket real(1);
     connection(broker, real, 200);
     playable(real, 200);
+    assert(real.headers == "HTTP/1.1 200 OK\r\nServer: libnoson/" LIBVERSION "\r\nConnection: close\r\n"
+        "Content-Type: audio/flac\r\nTransfer-Encoding: chunked\r\n\r\n");
+    std::cout << "PASS: streaming response restores Server and Connection: close headers\n";
     assert(generation == 1 && resumeCommands == 0);
     std::cout << "PASS: probe and second GET keep the ID and decode fresh FLAC\n";
 

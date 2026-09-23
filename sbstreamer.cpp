@@ -290,7 +290,8 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
             std::string error = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             handle->broker->ReplyData(error.c_str(), error.size());
         } else {
-            std::string resp = "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nTransfer-Encoding: chunked\r\n\r\n";
+            std::string resp = "HTTP/1.1 200 OK\r\nServer: libnoson/" LIBVERSION "\r\nConnection: close\r\n"
+                "Content-Type: audio/flac\r\nTransfer-Encoding: chunked\r\n\r\n";
             printf("stream %d: serving current generation with fresh FLAC header\n", stream);
             if (handle->broker->ReplyData(resp.c_str(), resp.size()) && sendChunk(handle, buf, r)) {
                 while (!IsAborted() && (r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed)) > 0) {
