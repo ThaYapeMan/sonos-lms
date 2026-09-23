@@ -122,13 +122,6 @@ extern "C" void sonos_lms_transport(char command)
     if (unpause == ResumeState::Unpause::FeedHeldGet) {
         printf("strm u: feeding held GET, no same-URL resume\n");
         acknowledge_squeezebox_resume(streamId.load());
-        std::unique_lock<std::mutex> lock(transportMutex, std::try_to_lock);
-        if (lock.owns_lock() && !stream_just_restarted() && gPlayer) {
-            if (gPlayer->Play())
-                printf("strm u: sent acknowledgement Play() alongside held GET\n");
-            else
-                printf("strm u: acknowledgement Play() failed\n");
-        }
         return; // process_strm releases PCM into the existing encoder
     }
     if (command == 'q') {
