@@ -34,6 +34,7 @@ extern "C" void end_squeezebox_response(void);
 extern "C" int squeezebox_response_ended(unsigned stream);
 extern "C" int squeezebox_response_open(unsigned stream);
 extern "C" void acknowledge_squeezebox_resume(unsigned stream);
+extern "C" void invalidate_squeezebox_held_get(unsigned stream);
 std::string SqueezeBoxURL(unsigned id) { return "http://bridge/music/squeezebox.flac?stream=" + std::to_string(id); }
 void ResumeSqueezeBox(unsigned id) {
     std::lock_guard<std::mutex> lock(stateMutex);
@@ -46,12 +47,12 @@ void ResumeSqueezeBox(unsigned id) {
     if (pendingResume && std::chrono::steady_clock::now() >= resumeAt) {
         // Simulate LMS receiving CLI play and answering with strm u, not s.
         assert(state.command('u', squeezebox_response_open(id)) == ResumeState::Unpause::SameURL);
+        invalidate_squeezebox_held_get(id);
         acknowledge_squeezebox_resume(id);
         pendingResume = false;
         paused = false;
         // Model PlayStream(same URL): the test's device opens a fresh GET.
-        // Do not end the held response; the real streamer retires its producer
-        // when the replacement GET arrives, leaving closure to the client.
+        // The cancelled held request closes before the device reconnects.
         ++sameURLRequests;
     }
 }
@@ -152,7 +153,7 @@ static void connection(SBStreamer& broker, Socket& socket, int first, bool held 
     http.get();
 }
 // Simulate Sonos honoring the same-URL PlayStream by opening a fresh GET.
-// The prior held request remains client-owned, even after the new GET plays.
+// Sonos waits for the speculative held request to close before reconnecting.
 static void deviceReconnect(SBStreamer& broker, unsigned id, int first) {
     unsigned requestsBefore = sameURLRequests.load();
     unsigned commandsBefore = resumeCommands.load();
@@ -168,7 +169,11 @@ static void deviceReconnect(SBStreamer& broker, unsigned id, int first) {
     while (sameURLRequests == requestsBefore && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     assert(sameURLRequests == requestsBefore + 1 && resumeCommands == commandsBefore + 1);
-    assert(!paused && !held.disconnected && !held.headersSent && !held.eof);
+    assert(!paused);
+    assert(oldGet.wait_for(std::chrono::milliseconds(300)) == std::future_status::ready);
+    oldGet.get();
+    assert(held.disconnected && !held.eof && held.body.empty());
+    assert(held.headers.find("503 Service Unavailable") != std::string::npos);
     assert(!squeezebox_response_ended(id));
     Socket fresh(id);
     auto freshGet = std::async(std::launch::async, [&] { serve(broker, fresh); });
@@ -179,12 +184,6 @@ static void deviceReconnect(SBStreamer& broker, unsigned id, int first) {
     freshGet.get();
     playable(fresh, first);
     assert(generation == id);
-    assert(!held.disconnected && !held.headersSent && !held.audioSeen && !held.eof);
-    assert(oldGet.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
-    held.clientClosed = true;
-    assert(oldGet.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
-    oldGet.get();
-    assert(held.body.empty() && !held.headersSent && !held.eof);
     assert(sameURLRequests == requestsBefore + 1 && resumeCommands == commandsBefore + 1);
 }
 
@@ -216,7 +215,7 @@ int main() {
     state.command('p'); paused = true; deviceState = "PAUSED_PLAYBACK";
     deviceReconnect(broker, 1, 400);
     assert(generation == 1 && resumeCommands == 1);
-    std::cout << "PASS: device transition plus strm p sends one play; fresh same-ID GET carries audio, held GET stays client-owned\n";
+    std::cout << "PASS: device transition plus strm p sends one play; held GET closes promptly, fresh same-ID GET carries audio\n";
 
     Socket predecessor(1, false, true), replacement(1, false, true);
     auto oldGet = std::async(std::launch::async, [&] { serve(broker, predecessor); });
@@ -324,5 +323,52 @@ int main() {
         assert(generation == 2);
     }
     assert(resumeCommands == 3);
-    std::cout << "PASS: ended-response device resumes reconnect with immediate and 4.3s LMS replies; fresh GET decodes, held GET stays client-owned\n";
+    std::cout << "PASS: ended-response device resumes reconnect with immediate and 4.3s LMS replies; held GET closes promptly and fresh GET decodes\n";
+
+    // A held speculative GET must close promptly, before Sonos opens a new one.
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        state.command('u'); state.observe("PLAYING");
+        state.command('p'); state.observe("PAUSED_PLAYBACK");
+        deviceState = "PAUSED_PLAYBACK"; paused = true;
+    }
+    Socket invalidated(2);
+    auto heldGet = std::async(std::launch::async, [&] { serve(broker, invalidated); });
+    auto openDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+    while (!squeezebox_response_open(2) && std::chrono::steady_clock::now() < openDeadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    assert(squeezebox_response_open(2) && !invalidated.headersSent);
+    invalidate_squeezebox_held_get(1); // wrong ID must not cancel this request
+    assert(squeezebox_response_open(2));
+    auto invalidationStart = std::chrono::steady_clock::now();
+    invalidate_squeezebox_held_get(2);
+    assert(heldGet.wait_for(std::chrono::milliseconds(300)) == std::future_status::ready);
+    heldGet.get();
+    assert(std::chrono::steady_clock::now() - invalidationStart < std::chrono::milliseconds(300));
+    assert(invalidated.disconnected && invalidated.body.empty() && !invalidated.eof);
+    assert(invalidated.headers.find("503 Service Unavailable") != std::string::npos);
+    assert(!squeezebox_response_open(2) && generation == 2 && resumeCommands == 3);
+    std::cout << "PASS: matching held GET invalidates with HTTP 503 and closes within 300ms; wrong ID is ignored\n";
+
+    state.command('u'); deviceState = "PLAYING"; paused = false;
+    Socket afterInvalidation(2, false, true);
+    auto freshGet = std::async(std::launch::async, [&] { serve(broker, afterInvalidation); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    assert(afterInvalidation.headersSent);
+    feed(1200);
+    auto audioReady = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!afterInvalidation.audioSeen && std::chrono::steady_clock::now() < audioReady)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    assert(afterInvalidation.audioSeen);
+    invalidate_squeezebox_held_get(2); // audio-producing encoder must survive
+    assert(squeezebox_response_open(2));
+    assert(freshGet.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+    assert(!afterInvalidation.disconnected && !afterInvalidation.eof);
+    end_squeezebox_response();
+    assert(freshGet.wait_for(std::chrono::milliseconds(300)) == std::future_status::ready);
+    freshGet.get();
+    playable(afterInvalidation, 1200);
+    assert(generation == 2 && afterInvalidation.eof && afterInvalidation.disconnected);
+    std::cout << "PASS: fresh same-ID GET decodes after invalidation; active audio is never invalidated\n";
+
 }

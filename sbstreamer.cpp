@@ -87,6 +87,15 @@ void acknowledge_squeezebox_resume(unsigned stream)
     if (endedByPause == stream) endedByPause = 0;
 }
 
+void invalidate_squeezebox_held_get(unsigned stream)
+{
+    std::lock_guard<std::mutex> lock(g_enc_mutex);
+    if (g_enc && g_enc->streamId() == stream && !g_enc->hasAudio() && !g_enc->responseEnded()) {
+        printf("stream %u: invalidating held GET for same-URL resume\n", stream);
+        g_enc->cancel();
+    }
+}
+
 void encode_squeezebox_audio(const char* data, int len)
 {
     unsigned stream = get_squeezebox_stream_id();

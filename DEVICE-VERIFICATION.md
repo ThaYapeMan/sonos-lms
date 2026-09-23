@@ -54,16 +54,22 @@ seeks. Re-priming a pause-ended response uses the same current URL and ID.
    one `LMS CLI: <mac> play`, and a `PlayStream(same URL)` reissue
    (SetAVTransportURI + Play), even if a GET was already held. Expect a fresh
    `Sonos requested stream N` connection carrying playable audio with the same
-   ID. The previous held connection stays open until the client closes it or
-   its existing timeout expires. Require status `OK` throughout, no HEAD/RST
-   corruption sequence, and no error flag. Repeat several cycles, explicitly
+   ID. Before PlayStream, expect `stream N: invalidating held GET for same-URL
+   resume` for a held request that has not produced audio. It closes through
+   the existing HTTP 503 path on the next wait-loop poll (about 10 ms), rather
+   than waiting for the five-second deadline. Require status `OK` throughout,
+   no HEAD/RST corruption sequence, and no error flag. Repeat several cycles, explicitly
    waiting for a device-opened GET while paused before pressing Sonos play.
 
-   **Known limitation:** this intentionally trades a small reconnect delay and
-   position drift for reliability. Physical testing found that feeding the
+   **Known limitation:** a fresh HTTP connection is still used, so position
+   drift remains possible. Held-GET cancellation makes the reconnect
+   near-immediate at the server (bounded by the roughly 10 ms poll interval,
+   not the five-second safety deadline); UPnP and device latency remain.
+   Physical testing found that feeding the
    device's own pre-opened connection directly could trigger a HEAD probe,
-   RST, and transient `ERROR_CORRUPT_FILE`. The new reconnect behavior still
-   requires physical acceptance testing.
+   RST, and transient `ERROR_CORRUPT_FILE`. Physical retesting confirmed the
+   SameURL reconnect removed that error; this cancellation change still needs
+   a physical latency retest.
 5. **(e) Status and startup isolation.** Require status `OK` throughout (a)-(d),
    with no `ERROR_*` flag at any point, including `ERROR_NO_PLAYABLE_CONTENT`,
    `ERROR_NO_RESOURCE`, `ERROR_LOST_CONNECTION`, and `ERROR_CORRUPT_FILE`.
@@ -74,6 +80,9 @@ seeks. Re-priming a pause-ended response uses the same current URL and ID.
 
 Only the newest same-ID connection receives PCM. A genuine older reader stays
 open until the client closes or the existing sub-five-second idle limit expires.
+Exception: SameURL resume cancels the current held GET before PlayStream when
+it has produced no audio and its response has not ended. Active audio is never
+cancelled by this hook, and the five-second resume safety deadline is unchanged.
 Both normal GETs get headers promptly; a GET arriving while LMS is still paused
 allows five seconds for the play → LMS CLI → strm u → PCM round trip. If no
 audio arrives in those five seconds, return HTTP 503 as the explicit timeout
@@ -101,13 +110,15 @@ Resume decision table:
 | No open GET | PlayStream with the same URL |
 
 Never more than one action per `u`. A GET must never end without audio unless
-its client closes it, except for the explicitly allowed HTTP 503 after five
-seconds without PCM. An ended-response flag must not override a pending new
-stream or an ordinary LMS unpause into an open GET.
+its client closes it, except for HTTP 503 after five seconds without PCM or
+prompt cancellation of a speculative held GET before a SameURL resume. An
+ended-response flag must not override a pending new stream or an ordinary LMS
+unpause into an open GET.
 
 Local regressions cover both paused-seek sequences and device resume with the
 old response's EOF flag retained, including a 4.3-second LMS response delay.
-Device-resume tests decode audio from a fresh same-ID GET and verify that
-replacing its producer does not force-close the old held connection.
+Device-resume tests verify that the cancelled held GET closes with HTTP 503
+within 300 ms before opening and decoding a fresh same-ID GET. They also
+verify wrong-stream invalidation is ignored and active audio is preserved.
 Physical acceptance (a)–(e) must still be run by the user; local tests cannot
 establish the device's status or confirm audible playback.

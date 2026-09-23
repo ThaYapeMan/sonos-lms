@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <mutex>
 #include <string>
+#include <vector>
 
 static std::atomic<bool> ourStreamStarted{true}, lmsPaused{false};
 static std::atomic<unsigned> streamId{6}, lmsStreamSerial{0}, completedStream{6};
@@ -14,6 +15,8 @@ static StopDebounce deferredStop;
 static bool stream_just_restarted() { return false; }
 static bool responseOpen = false, responseEnded = false;
 static unsigned cliPlays = 0, streamPlays = 0, transportPlays = 0;
+static unsigned heldGetInvalidations = 0;
+static std::vector<std::string> callOrder;
 struct Transport { std::string TransportState, TransportStatus; };
 struct FakePlayer {
     Transport property;
@@ -21,6 +24,9 @@ struct FakePlayer {
     std::string GetControllerUri() { return "http://bridge"; }
     bool PlayStream(const std::string& url, const std::string&, const std::string&) {
         assert(url == "http://bridge/music/squeezebox.flac?stream=6");
+        callOrder.push_back("PlayStream");
+        assert(heldGetInvalidations == streamPlays + 1);
+        assert(callOrder.size() == 2 && callOrder[0] == "invalidate" && callOrder[1] == "PlayStream");
         ++streamPlays;
         return true;
     }
@@ -33,6 +39,12 @@ static bool squeezebox_response_open(unsigned id) { assert(id == 6); return resp
 static bool squeezebox_response_ended(unsigned id) { assert(id == 6); return responseEnded; }
 static void end_squeezebox_response() { responseOpen = false; responseEnded = true; }
 static void acknowledge_squeezebox_resume(unsigned id) { assert(id == 6); responseEnded = false; }
+static void invalidate_squeezebox_held_get(unsigned id) {
+    assert(id == 6);
+    ++heldGetInvalidations;
+    callOrder.push_back("invalidate");
+    responseOpen = false;
+}
 static bool sendLmsCommand(int, int, const char* command) {
     if (std::string(command) == "play") ++cliPlays;
     return true;
@@ -70,7 +82,8 @@ struct Status {
 static void paused(const char* status) {
     resumeState = ResumeState{};
     deferredStop = StopDebounce{};
-    cliPlays = streamPlays = transportPlays = 0;
+    cliPlays = streamPlays = transportPlays = heldGetInvalidations = 0;
+    callOrder.clear();
     responseOpen = true;
     responseEnded = false;
     lmsPaused = false;
@@ -81,6 +94,7 @@ static void paused(const char* status) {
     SONOS::Status snapshot;
     refreshStatus(snapshot);
     assert(lmsPaused && !responseOpen && responseEnded && cliPlays == 0);
+    assert(heldGetInvalidations == 0 && callOrder.empty());
 }
 
 int main() {
@@ -109,7 +123,7 @@ int main() {
     ResumeSqueezeBox(6);
     assert(cliPlays == 1);
     sonos_lms_transport('u');
-    assert(responseOpen && !lmsPaused && !responseEnded);
+    assert(!responseOpen && !lmsPaused && !responseEnded);
     assert(streamPlays == 1 && transportPlays == 0);
     puts("PASS: open GET does not stop a device resume from reissuing PlayStream");
 
@@ -119,7 +133,7 @@ int main() {
     assert(cliPlays == 1);
     responseOpen = true; // GET arrives before the asynchronous LMS strm u
     sonos_lms_transport('u');
-    assert(streamPlays == 1 && responseOpen && !lmsPaused);
+    assert(streamPlays == 1 && !responseOpen && !lmsPaused);
     puts("PASS: GET arriving after status resume but before strm u still reissues PlayStream");
 
     paused("ERROR_NO_RESOURCE");
@@ -131,4 +145,19 @@ int main() {
     sonos_lms_transport('u');
     assert(streamPlays == 1 && !lmsPaused);
     puts("PASS: GET closed before strm u re-primes instead of feeding a missing response");
+    puts("PASS: every SameURL resume invalidates the held GET exactly once before PlayStream");
+
+    paused("OK");
+    responseOpen = true; // ordinary LMS unpause, no takeResume
+    sonos_lms_transport('u');
+    assert(responseOpen && !lmsPaused && streamPlays == 0);
+    assert(heldGetInvalidations == 0 && callOrder.empty());
+    puts("PASS: ordinary held-GET unpause does not invalidate or reissue PlayStream");
+
+    paused("OK");
+    sonos_lms_transport('s');
+    sonos_lms_transport('u');
+    assert(streamPlays == 0 && heldGetInvalidations == 0 && callOrder.empty());
+    puts("PASS: pending new stream does not invalidate a held GET");
+
 }

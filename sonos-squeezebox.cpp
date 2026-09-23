@@ -74,6 +74,7 @@ extern "C" void end_squeezebox_response(void);
 extern "C" int squeezebox_response_ended(unsigned stream);
 extern "C" int squeezebox_response_open(unsigned stream);
 extern "C" void acknowledge_squeezebox_resume(unsigned stream);
+extern "C" void invalidate_squeezebox_held_get(unsigned stream);
 static std::mutex stopMutex;
 static StopDebounce deferredStop;
 static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition);
@@ -149,6 +150,7 @@ extern "C" void sonos_lms_transport(char command)
         bool ok;
         if (ended || missing || error) {
             if (error) printf("device in error state -> re-issuing PlayStream\n");
+            if (missing) invalidate_squeezebox_held_get(streamId.load());
             ok = PlaySqueezeBoxLocked(streamId.load(), false);
         } else {
             ok = pause ? gPlayer->Pause() : gPlayer->Play();
