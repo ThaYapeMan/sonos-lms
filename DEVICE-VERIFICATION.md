@@ -33,8 +33,8 @@ seeks. Re-priming a pause-ended response uses the same current URL and ID.
    its buffered audio when SetAVTransportURI is reissued. Refinement for later:
    record device RelTime at pause and seek LMS to that position before resuming.
    This change does not implement that compensation. Same-URL PlayStream is
-   used only when no new stream is pending and there is no held GET or pending
-   device-initiated resume.
+   used when no new stream is pending and either no GET is open or the bridge
+   detected a device-initiated resume, even if a GET is already open.
 3. **(c) Seek by dragging the LMS bar — defect H acceptance.** During playback,
    drag forward and then backward within the same track. Each q/s burst should
    log `strm q: deferring Pause for 400 ms` followed by
@@ -51,10 +51,19 @@ seeks. Re-priming a pause-ended response uses the same current URL and ID.
    Verify LMS and HueSync's follower show paused and status remains
    `OK | PAUSED_PLAYBACK`. The device's new GET waits for audio. Press play in
    the Sonos app: expect `Device-initiated resume: current stream N`, exactly
-   one `LMS CLI: <mac> play`, and `strm u: feeding held GET, no same-URL resume`.
-   That held GET must stream playable audio with the same ID. Require no
-   `PlayStream(same URL)` line, no replacement GET caused by the bridge, no
-   `no audio before timeout`, no empty response, and no error flag.
+   one `LMS CLI: <mac> play`, and a `PlayStream(same URL)` reissue
+   (SetAVTransportURI + Play), even if a GET was already held. Expect a fresh
+   `Sonos requested stream N` connection carrying playable audio with the same
+   ID. The previous held connection stays open until the client closes it or
+   its existing timeout expires. Require status `OK` throughout, no HEAD/RST
+   corruption sequence, and no error flag. Repeat several cycles, explicitly
+   waiting for a device-opened GET while paused before pressing Sonos play.
+
+   **Known limitation:** this intentionally trades a small reconnect delay and
+   position drift for reliability. Physical testing found that feeding the
+   device's own pre-opened connection directly could trigger a HEAD probe,
+   RST, and transient `ERROR_CORRUPT_FILE`. The new reconnect behavior still
+   requires physical acceptance testing.
 5. **(e) Status and startup isolation.** Require status `OK` throughout (a)-(d),
    with no `ERROR_*` flag at any point, including `ERROR_NO_PLAYABLE_CONTENT`,
    `ERROR_NO_RESOURCE`, `ERROR_LOST_CONNECTION`, and `ERROR_CORRUPT_FILE`.
@@ -71,10 +80,10 @@ audio arrives in those five seconds, return HTTP 503 as the explicit timeout
 exception. Pause ends all current-ID responses cleanly, preserving the ID.
 Only an older stream ID redirects directly to the current URL after a restart.
 
-If a device is already in `ERROR_LOST_CONNECTION`, only a resume with neither
-new-stream intent, a held GET, nor a pending device-resume request reissues the
-current URL via PlayStream. Verify audio and
-`OK` without a second pause/play cycle.
+A detected device resume reissues the current URL via PlayStream regardless
+of whether a GET is open, unless a new stream is still pending. This also
+applies in `ERROR_LOST_CONNECTION`. Verify audio and `OK` without a second
+pause/play cycle.
 
 Local tests exercise the real HTTP broker with simulated sockets and decode its
 FLAC; they cover both headers, client-owned probe closure, continued new-reader
@@ -82,21 +91,23 @@ audio, retained EOF state across reconnects, 30-second pause, idle limits, and
 q/s cancellation versus delayed genuine stop. They cannot prove physical Sonos
 status, audible stutter, or network command latency.
 
-Resume decision table (also beside the transport state table in
-`slimproto_sonos.c`):
+Resume decision table:
 
 | State at `strm u`, in priority order | Sole action |
 | --- | --- |
-| `strm s` arrived while paused, including `p/q/s` | Let the decoded new-stream boundary allocate an ID and call PlaySqueezeBox |
-| Held GET present, or bridge requested LMS play for device resume | Feed that GET; do not issue PlayStream |
-| Neither | PlayStream with the same URL |
+| New stream still pending after a paused `strm s`, including `p/q/s` | Let the decoded new-stream boundary allocate an ID and call PlaySqueezeBox |
+| Bridge requested LMS play for a detected device resume | PlayStream with the same URL, even with a held GET |
+| Open GET present without a detected device resume | Feed that GET; do not issue PlayStream |
+| No open GET | PlayStream with the same URL |
 
 Never more than one action per `u`. A GET must never end without audio unless
 its client closes it, except for the explicitly allowed HTTP 503 after five
 seconds without PCM. An ended-response flag must not override a pending new
-stream or a held GET.
+stream or an ordinary LMS unpause into an open GET.
 
 Local regressions cover both paused-seek sequences and device resume with the
 old response's EOF flag retained, including a 4.3-second LMS response delay.
+Device-resume tests decode audio from a fresh same-ID GET and verify that
+replacing its producer does not force-close the old held connection.
 Physical acceptance (a)–(e) must still be run by the user; local tests cannot
 establish the device's status or confirm audible playback.

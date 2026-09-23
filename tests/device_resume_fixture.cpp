@@ -110,8 +110,8 @@ int main() {
     assert(cliPlays == 1);
     sonos_lms_transport('u');
     assert(responseOpen && !lmsPaused && !responseEnded);
-    assert(streamPlays == 0 && transportPlays == 0);
-    puts("PASS: open GET owns device resume and strm u feeds it without PlayStream");
+    assert(streamPlays == 1 && transportPlays == 0);
+    puts("PASS: open GET does not stop a device resume from reissuing PlayStream");
 
     paused("ERROR_NO_RESOURCE");
     player.property.TransportState = "TRANSITIONING";
@@ -119,8 +119,8 @@ int main() {
     assert(cliPlays == 1);
     responseOpen = true; // GET arrives before the asynchronous LMS strm u
     sonos_lms_transport('u');
-    assert(streamPlays == 0 && responseOpen && !lmsPaused);
-    puts("PASS: GET arriving after status resume but before strm u is fed without PlayStream");
+    assert(streamPlays == 1 && responseOpen && !lmsPaused);
+    puts("PASS: GET arriving after status resume but before strm u still reissues PlayStream");
 
     paused("ERROR_NO_RESOURCE");
     responseOpen = true;

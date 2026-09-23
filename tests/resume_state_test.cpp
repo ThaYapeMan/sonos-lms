@@ -33,14 +33,14 @@ int main() {
     held.observe("PAUSED_PLAYBACK"); held.command('p');
     held.observe("TRANSITIONING");
     assert(held.takeResume(1, 1));
-    assert(held.command('u', true) == Unpause::FeedHeldGet); // held GET is actually open
+    assert(held.command('u', true) == Unpause::SameURL); // device resume reconnects even with an open GET
     held.command('p');
     assert(held.command('u') == Unpause::SameURL);
     ResumeState playingSeek;
     playingSeek.command('s'); playingSeek.observe("PLAYING");
     playingSeek.command('q'); playingSeek.command('s');
     assert(playingSeek.command('u') == Unpause::SameURL);
-    std::cout << "PASS: paused p/s/u and p/q/s/u choose only new stream; held GET/device play wins over same-URL resume\n";
+    std::cout << "PASS: paused p/s/u and p/q/s/u choose only new stream; LMS held GET feeds, device resume reconnects\n";
     ResumeState state;
     state.command('s'); state.observe("PLAYING");
     assert(!state.takeResume(1, 1)); // first GET

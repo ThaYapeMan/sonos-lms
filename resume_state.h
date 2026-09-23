@@ -14,7 +14,7 @@ public:
             // Decide before clearing the device-resume request. Exactly one
             // action wins, even when a paused seek also has an old held GET.
             action = newStreamPending ? Unpause::NewStream
-                : responseOpen ? Unpause::FeedHeldGet
+                : (responseOpen && !requested) ? Unpause::FeedHeldGet
                 : Unpause::SameURL;
             newStreamPending = pausedBeforeStop = false;
         } else if (command == 's') {
