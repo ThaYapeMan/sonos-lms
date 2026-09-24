@@ -143,8 +143,9 @@ wait_s() {
 prompt() {
     say ""
     say ">>> $*"
+    mark "PROMPT shown: $*"
     read -r -p "    press Enter right after you did it " _ || true
-    mark "SONOS APP: $*"
+    mark "SONOS APP confirmed (Enter): $*"
 }
 
 # Record what the tester heard.
@@ -154,6 +155,29 @@ observe() {
     read -r -p "??? $* " answer || true
     printf '[%s] OBSERVED: %s -> %s\n' "$(now)" "$*" "${answer:-<no answer>}" | tee -a "$OUT/steps.log" >&2
     have logger && logger -t sonos-test "OBSERVED: $* -> ${answer:-<no answer>}"
+}
+
+# Physical Sonos transport state (PLAYING, PAUSED_PLAYBACK, STOPPED, ...), taken
+# from the bridge's own status table in the journal. Empty if unavailable.
+sonos_state() {
+    have journalctl || return 0
+    journalctl -u "$UNIT" -n 300 -o cat --no-pager 2>/dev/null \
+        | awk -F'|' 'NF >= 6 && $2 !~ /Title/ { st = $3 } END { gsub(/ /, "", st); print st }'
+}
+
+lms_mode() { local r; r=$(cli_raw "$PLAYER mode ?"); printf '%s' "${r##* }"; }
+lms_time() { field "$(cli_raw "$PLAYER status - 1 tags:a")" time 2>/dev/null || echo 0; }
+
+# Wait up to $2 seconds until the speaker reports state $1.
+wait_sonos() {
+    local want=$1 i st=''
+    for (( i = 0; i < $2 * 2; i++ )); do
+        st=$(sonos_state)
+        [[ -z $st || $st == "$want" ]] && return 0   # empty = cannot check
+        sleep 0.5
+    done
+    say "    speaker state is '$st', expected '$want'"
+    return 1
 }
 
 snapshot() { printf '[%s] LMS %s\n' "$(now)" "$(status_line)" | tee -a "$OUT/steps.log" >&2; }
@@ -230,24 +254,27 @@ play_track() { lms playlistcontrol cmd:load "track_id:$1"; }
 # Scenario precondition: track A freshly started by LMS and audibly playing.
 # Each scenario sets up its own start state instead of inheriting the last one.
 setup_playing_a() {
-    local i
+    local t1 t2 i
     mark "setup: LMS loads track A"
     play_track "$TRACK_A_ID"
     for (( i = 0; i < 20; i++ )); do
-        # Reply: "<player> mode play"
-        [[ $(cli_raw "$PLAYER mode ?") == *" mode play" ]] && break
+        [[ $(lms_mode) == play ]] && break
         sleep 0.5
     done
-    wait_s 12
+    wait_s 8
+    # Preconditions: speaker really PLAYING, LMS position really advancing.
+    # A stalled start (speaker kept a connection that gets no audio) shows
+    # LMS mode=play with a position cycling near zero.
+    wait_sonos PLAYING 7
+    local sonos_ok=$?
+    t1=$(lms_time); sleep 2; t2=$(lms_time)
     snapshot
-    # A stalled start (Sonos kept a connection that gets no audio) leaves the
-    # LMS position stuck near zero. Flag it instead of testing on top of it.
-    local pos
-    pos=$(field "$(cli_raw "$PLAYER status - 1 tags:a")" time 2>/dev/null || echo 0)
-    if ! awk -v p="$pos" 'BEGIN { exit !(p >= 5) }'; then
-        mark "SETUP FAILED: LMS position ${pos}s after setup, track A is not playing"
-        observe "setup: what does the speaker do? (playing/stopped/silent/error dialog)"
+    if (( sonos_ok != 0 )) || ! awk -v a="$t1" -v b="$t2" 'BEGIN { exit !(b >= a + 1) }'; then
+        mark "SETUP FAILED: speaker=$(sonos_state) lms_mode=$(lms_mode) position ${t1}s -> ${t2}s; scenario skipped"
+        observe "setup failed: what does the speaker do? (playing/stopped/silent/error dialog)"
+        return 1
     fi
+    mark "setup OK: speaker PLAYING, LMS position ${t1}s -> ${t2}s"
 }
 
 scenario_1() {
@@ -260,7 +287,7 @@ scenario_1() {
 
 scenario_2() {
     mark "S2 SONOS APP pause/resume x3 on track A"
-    setup_playing_a
+    setup_playing_a || return 0
     local i
     for i in 1 2 3; do
         prompt "S2.$i press PAUSE in the Sonos app"; wait_s 5; snapshot
@@ -271,7 +298,7 @@ scenario_2() {
 
 scenario_3() {
     mark "S3 LMS track change while playing: A -> B"
-    setup_playing_a
+    setup_playing_a || return 0
     mark "S3 LMS loads track B"
     play_track "$TRACK_B_ID"; wait_s 15; snapshot
     observe "S3: is track B playing on the speaker? (y/n/other)"
@@ -279,7 +306,7 @@ scenario_3() {
 
 scenario_4() {
     mark "S4 LMS track change while paused (LMS pause, then LMS loads B)"
-    setup_playing_a
+    setup_playing_a || return 0
     mark "S4 LMS pause"
     lms pause 1; wait_s 8; snapshot
     mark "S4 LMS loads track B while paused"
@@ -289,7 +316,7 @@ scenario_4() {
 
 scenario_5() {
     mark "S5 Sonos-app pause, then LMS track change, then check"
-    setup_playing_a
+    setup_playing_a || return 0
     prompt "S5 press PAUSE in the Sonos app"; wait_s 8; snapshot
     mark "S5 LMS loads track B while Sonos-paused"
     play_track "$TRACK_B_ID"; wait_s 15; snapshot
@@ -301,17 +328,31 @@ scenario_5() {
 
 scenario_6() {
     mark "S6 long pause from the Sonos app (${LONG_PAUSE}s), then Sonos-app play"
-    setup_playing_a
+    setup_playing_a || return 0
     prompt "S6 press PAUSE in the Sonos app"
-    local left=$LONG_PAUSE
+    if ! wait_sonos PAUSED_PLAYBACK 10 || [[ $(lms_mode) != pause ]]; then
+        mark "S6 ABORTED: pause not confirmed (speaker=$(sonos_state) lms_mode=$(lms_mode))"
+        observe "S6 aborted: what does the speaker/app show?"
+        return 0
+    fi
+    mark "S6 pause confirmed: speaker PAUSED_PLAYBACK, LMS pause; countdown starts"
+    local left=$LONG_PAUSE st
     while (( left > 0 )); do
         printf '\r    paused, %4ds left ' "$left" >&2
         wait_s 10; (( left -= 10 ))
+        st=$(sonos_state)
+        if [[ -n $st && $st != PAUSED_PLAYBACK ]] || [[ $(lms_mode) != pause ]]; then
+            printf '\n' >&2
+            mark "S6 INVALID: pause interrupted after $(( LONG_PAUSE - left ))s (speaker=$st lms_mode=$(lms_mode))"
+            observe "S6 invalid: did you press anything? what happened?"
+            return 0
+        fi
         (( left % 60 == 0 )) && snapshot 2>/dev/null
     done
     printf '\n' >&2
     snapshot
     prompt "S6 press PLAY in the Sonos app"; wait_s 15; snapshot
+    mark "S6 after PLAY: speaker=$(sonos_state) lms_mode=$(lms_mode)"
     observe "S6: continued (c), restarted (r), silent (s), error dialog (e)?"
 }
 
