@@ -240,6 +240,14 @@ setup_playing_a() {
     done
     wait_s 12
     snapshot
+    # A stalled start (Sonos kept a connection that gets no audio) leaves the
+    # LMS position stuck near zero. Flag it instead of testing on top of it.
+    local pos
+    pos=$(field "$(cli_raw "$PLAYER status - 1 tags:a")" time 2>/dev/null || echo 0)
+    if ! awk -v p="$pos" 'BEGIN { exit !(p >= 5) }'; then
+        mark "SETUP FAILED: LMS position ${pos}s after setup, track A is not playing"
+        observe "setup: what does the speaker do? (playing/stopped/silent/error dialog)"
+    fi
 }
 
 scenario_1() {
