@@ -1,5 +1,6 @@
 #include "sbstreamer.h"
 #include "resume_state.h"
+#include "device_resume.h"
 #include "private/socket.h"
 #include "private/wsrequestbroker.h"
 #include <FLAC++/decoder.h>
@@ -70,6 +71,7 @@ public:
     }
     bool SendData(const char* data, size_t n) override {
         if (drop || clientClosed.load()) return false;
+        wire.append(data, n);
         if (n == 5 && memcmp(data, "0\r\n\r\n", 5) == 0) {
             assert(!disconnected); eof = true; return true;
         }
@@ -93,7 +95,7 @@ public:
     void Disconnect() override { disconnected = true; }
     std::atomic<bool> clientClosed{false};
     std::atomic<bool> headersSent{false}, audioSeen{false}, eof{false}, disconnected{false};
-    std::string headers;
+    std::string headers, wire;
     std::vector<char> body;
 private:
     std::string input;
@@ -187,7 +189,46 @@ static void deviceReconnect(SBStreamer& broker, unsigned id, int first) {
     assert(sameURLRequests == requestsBefore + 1 && resumeCommands == commandsBefore + 1);
 }
 
-int main() {
+static void modeTest() {
+    SBStreamer broker;
+    const auto mode = deviceResumeStrategy();
+    state.command('p'); paused = true; deviceState = "PAUSED_PLAYBACK";
+    Socket held(1, false, true);
+    auto request = std::async(std::launch::async, [&] { serve(broker, held); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    assert(squeezebox_response_open(1) && !held.headersSent);
+    if (mode == DeviceResume::PlayOnly) {
+        state.command('u', true); paused = false;
+        acknowledge_squeezebox_resume(1);
+        feed(1234);
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        assert(held.audioSeen && !held.disconnected);
+        held.clientClosed = true;
+    } else {
+        invalidate_squeezebox_held_get(1);
+    }
+    assert(request.wait_for(std::chrono::milliseconds(300)) == std::future_status::ready);
+    request.get();
+    const std::string unavailable = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    if (mode == DeviceResume::PlayOnly) playable(held, 1234);
+    else if (mode == DeviceResume::SameURLClose) assert(held.wire.empty());
+    else if (mode == DeviceResume::SameURLEmpty200)
+        assert(held.wire == "HTTP/1.1 200 OK\r\nServer: libnoson/" LIBVERSION "\r\nConnection: close\r\n"
+            "Content-Type: audio/flac\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
+    else assert(held.wire == unavailable);
+    assert(held.disconnected);
+    state.command('p'); paused = true;
+    Socket timeout(1);
+    auto start = std::chrono::steady_clock::now();
+    serve(broker, timeout);
+    assert(std::chrono::steady_clock::now() - start >= std::chrono::seconds(5));
+    assert(timeout.wire == unavailable);
+    printf("PASS: %s exact cancellation bytes or held PCM; uncancelled timeout remains 503\n", deviceResumeName(mode));
+}
+
+int main(int argc, char**) {
+    if (argc > 1) { modeTest(); return 0; }
+
     setvbuf(stdout, nullptr, _IOLBF, 0);
     SBStreamer broker;
     state.command('s'); state.observe("PLAYING");

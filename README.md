@@ -215,3 +215,16 @@ GPL-compatible outbound license -- no additional, more restrictive terms (e.g. a
 noncommercial clause) can be layered on top.
 
 Copyright (C) 2026 Jaap van Vliet
+
+### Diagnostics
+
+`SONOS_SQUEEZEBOX_DEVICE_RESUME` is a temporary device-test switch, read and
+logged once at startup. `sameurl-503` (default) retains the existing same-URL
+resume and cancelled held-GET 503 response. `sameurl-close` disconnects a
+cancelled GET without audio or HTTP bytes; `sameurl-empty200` sends streaming
+200 headers and an empty chunked body. `playonly` keeps an open held GET,
+attempts one UPnP Play using a non-blocking transport lock, and feeds that GET
+when PCM arrives; without an open GET it falls back to the same-URL path.
+Unknown values warn and use `sameurl-503`. The uncancelled five-second no-audio
+timeout returns 503 in every mode. Each application logs `device resume:
+strategy=<mode>`. Physical Sonos verification is still required.

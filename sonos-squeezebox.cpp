@@ -18,6 +18,7 @@
 #include <sonossystem.h>
 
 #include "resume_state.h"
+#include "device_resume.h"
 #include "sbstreamer.h"
 #include "sonos-position.h"
 #include "sonos-status.h"
@@ -101,10 +102,11 @@ extern "C" void sonos_lms_transport(char command)
             printf("strm q: superseded by strm s, no Pause\n");
     }
     ResumeState::Unpause unpause;
+    bool responseOpen;
     {
         std::lock_guard<std::mutex> lock(resumeMutex);
-        unpause = resumeState.command(command,
-            command == 'u' && squeezebox_response_open(streamId.load()));
+        responseOpen = command == 'u' && squeezebox_response_open(streamId.load());
+        unpause = resumeState.command(command, responseOpen);
     }
     if (command == 's') {
         ++lmsStreamSerial; // release a producer waiting on an obsolete HTTP request
@@ -122,9 +124,26 @@ extern "C" void sonos_lms_transport(char command)
         printf("strm u: new stream pending from strm s, no same-URL resume\n");
         return; // decoded track boundary allocates the ID and calls PlaySqueezeBox
     }
+    bool playOnly = responseOpen && unpause == ResumeState::Unpause::SameURL
+        && deviceResumeStrategy() == DeviceResume::PlayOnly
+        && squeezebox_response_open(streamId.load());
+    if (unpause == ResumeState::Unpause::SameURL)
+        printf("device resume: strategy=%s stream=%u action=%s\n",
+            deviceResumeName(deviceResumeStrategy()), streamId.load(),
+            playOnly ? "Play and feed held GET" : "SameURL");
+    if (playOnly) unpause = ResumeState::Unpause::FeedHeldGet;
     if (unpause == ResumeState::Unpause::FeedHeldGet) {
         printf("strm u: feeding held GET, no same-URL resume\n");
         acknowledge_squeezebox_resume(streamId.load());
+        if (playOnly) {
+            std::unique_lock<std::mutex> lock(transportMutex, std::try_to_lock);
+            if (lock.owns_lock() && !stream_just_restarted() && gPlayer) {
+                bool ok = gPlayer->Play();
+                printf("device resume: strategy=playonly Play() %s\n", ok ? "sent" : "failed");
+            } else {
+                printf("device resume: strategy=playonly Play() skipped: transport unavailable\n");
+            }
+        }
         return; // process_strm releases PCM into the existing encoder
     }
     if (command == 'q') {
@@ -706,6 +725,7 @@ static std::string readLmsServerFromConfig(const char* path = "/etc/sonos-squeez
 int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);
+    (void)deviceResumeStrategy();
 
     int debugLevel = findFlag(argc, argv, "--debug") ? 4 : 0;
     const char* ip = findOption(argc, argv, "--ip");

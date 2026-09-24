@@ -1,4 +1,5 @@
 #include "resume_state.h"
+#include "device_resume.h"
 #include "stop_debounce.h"
 #include <atomic>
 #include <cassert>
@@ -6,6 +7,8 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <thread>
+static std::atomic<bool> lockHeld{false}, releaseLock{false};
 
 static std::atomic<bool> ourStreamStarted{true}, lmsPaused{false};
 static std::atomic<unsigned> streamId{6}, lmsStreamSerial{0}, completedStream{6};
@@ -111,6 +114,38 @@ static void paused(const char* status) {
 }
 
 int main() {
+    if (deviceResumeStrategy() == DeviceResume::PlayOnly) {
+        for (bool held : {true, false}) {
+            paused("OK");
+            responseOpen = held;
+            player.property.TransportState = "TRANSITIONING";
+            ResumeSqueezeBox(6);
+            ResumeSqueezeBox(6);
+            sonos_lms_transport('u');
+            assert(cliPlays == 1 && !lmsPaused && !responseEnded);
+            assert(transportPlays == (held ? 1u : 0u));
+            assert(streamPlays == (held ? 0u : 1u));
+            assert(heldGetInvalidations == (held ? 0u : 1u));
+            assert(responseOpen == held);
+        }
+        paused("OK");
+        responseOpen = true;
+        player.property.TransportState = "TRANSITIONING";
+        ResumeSqueezeBox(6);
+        std::thread owner([] {
+            std::lock_guard<std::mutex> lock(transportMutex);
+            lockHeld = true;
+            while (!releaseLock) std::this_thread::yield();
+        });
+        while (!lockHeld) std::this_thread::yield();
+        sonos_lms_transport('u');
+        assert(responseOpen && !lmsPaused && transportPlays == 0 && streamPlays == 0 && heldGetInvalidations == 0);
+        releaseLock = true;
+        owner.join();
+        puts("PASS: playonly sends one Play with held GET; missing GET falls back; contention skips without blocking");
+        return 0;
+    }
+
     for (bool success : {true, false}) {
         pauseResult = success;
         paused("OK");

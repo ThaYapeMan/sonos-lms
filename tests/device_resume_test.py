@@ -1,6 +1,7 @@
 """Run the production resume functions with simulated device/LMS boundaries."""
 from pathlib import Path
 import subprocess
+import os
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,4 +36,6 @@ with tempfile.TemporaryDirectory(prefix="sonos-device-resume-") as directory:
         "-I", str(directory), str(ROOT / "tests/device_resume_fixture.cpp"),
         "-o", str(executable), "-lpthread",
     ], check=True)
-    subprocess.run([str(executable)], check=True)
+    for mode in ("sameurl-503", "sameurl-close", "sameurl-empty200", "playonly", "unknown"):
+        subprocess.run([str(executable)], check=True,
+                       env={**os.environ, "SONOS_SQUEEZEBOX_DEVICE_RESUME": mode})

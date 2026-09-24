@@ -54,14 +54,17 @@ test: encoder-test resume-state-test streamer-test
 	./encoder-test
 	./resume-state-test
 	./streamer-test
+	@for mode in sameurl-503 sameurl-close sameurl-empty200 playonly unknown; do SONOS_SQUEEZEBOX_DEVICE_RESUME=$$mode ./streamer-test mode || exit $$?; done
 	python3 tests/device_resume_test.py
 	python3 tests/lms_discovery_test.py
 
 sbstreamer.o sbencoder.o: sbencoder.h
 
+sonos-squeezebox.o sbstreamer.o: device_resume.h
+
 sonos-squeezebox.o: resume_state.h stop_debounce.h
 resume-state-test: tests/resume_state_test.cpp resume_state.h stop_debounce.h
 	g++ -g -O2 -Wall -I. -o $@ tests/resume_state_test.cpp
 
-streamer-test: tests/streamer_test.cpp sbstreamer.cpp sbstreamer.h sbencoder.cpp sbencoder.h resume_state.h noson/noson/libnoson.a
+streamer-test: device_resume.h tests/streamer_test.cpp sbstreamer.cpp sbstreamer.h sbencoder.cpp sbencoder.h resume_state.h noson/noson/libnoson.a
 	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -o $@ tests/streamer_test.cpp sbstreamer.cpp sbencoder.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
