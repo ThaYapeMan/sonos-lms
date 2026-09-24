@@ -309,18 +309,39 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
                 handle->broker->ReplyData("0\r\n\r\n", 5);
             }
         }
-        if (peerClosed()) printf("stream %d: client closed connection\n", stream);
-        // EOF above must precede socket close. Keep a paused encoder alive;
-        // the next same-ID request cancels/replaces it, with a fresh FLAC header.
-        handle->broker->Socket()->Disconnect();
-        if (!enc->responseEnded()) {
-            enc->cancel();
-            {
-                std::lock_guard<std::mutex> lock(g_enc_mutex);
-                if (g_enc == enc) g_enc.reset();
+        const bool clientClosed = peerClosed();
+        if (clientClosed) printf("stream %d: client closed connection\n", stream);
+        {
+            std::lock_guard<std::mutex> lock(g_enc_mutex);
+            const bool restore = clientClosed && !enc->cancelled() && !enc->responseEnded()
+                && (unsigned)stream == get_squeezebox_stream_id();
+            // Remove this reader before another worker can select it for feeding.
+            connections.erase(std::remove_if(connections.begin(), connections.end(),
+                [&](const std::weak_ptr<SBEncoder>& c) {
+                    auto candidate = c.lock();
+                    return !candidate || candidate == enc;
+                }), connections.end());
+            if (!enc->responseEnded()) {
+                enc->cancel();
+                if (g_enc == enc) {
+                    g_enc.reset();
+                    if (restore) {
+                        for (auto it = connections.rbegin(); it != connections.rend(); ++it) {
+                            auto candidate = it->lock();
+                            if (candidate && candidate->streamId() == (unsigned)stream
+                                && !candidate->cancelled() && !candidate->responseEnded()) {
+                                candidate->resumeProducer();
+                                g_enc = candidate;
+                                break;
+                            }
+                        }
+                    }
+                }
             }
-            enc->close();
         }
+        // Preserve paused encoders and send EOF before disconnecting.
+        handle->broker->Socket()->Disconnect();
+        if (!enc->responseEnded()) enc->close();
         printf("stream %d: done\n", stream);
     }
 

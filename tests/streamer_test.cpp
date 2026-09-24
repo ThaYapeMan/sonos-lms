@@ -246,6 +246,31 @@ int main() {
     assert(generation == 1 && resumeCommands == 1);
     std::cout << "PASS: both GETs get headers; client closes the older; newest keeps streaming\n";
 
+    Socket survivor(1, false, true), shortLived(1, false, true);
+    auto survivingGet = std::async(std::launch::async, [&] { serve(broker, survivor); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    assert(survivor.headersSent);
+    auto shortGet = std::async(std::launch::async, [&] { serve(broker, shortLived); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    assert(shortLived.headersSent && !survivor.disconnected);
+    feed(510);
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    assert(shortLived.audioSeen && !survivor.audioSeen);
+    shortLived.clientClosed = true;
+    assert(shortGet.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    shortGet.get();
+    // Keep feeding beyond the original four-second idle deadline.
+    for (int n = 0; n < 10; ++n) {
+        feed(520 + n);
+        std::this_thread::sleep_for(std::chrono::milliseconds(450));
+        assert(!survivor.disconnected && !survivor.eof);
+    }
+    assert(survivor.audioSeen);
+    survivor.clientClosed = true;
+    survivingGet.get();
+    playable(survivor, 520);
+    std::cout << "PASS: client closes newest GET; surviving first GET receives PCM beyond idle deadline\n";
+
     // An established response ends immediately after Pause, including a read
     // already waiting for PCM. Keep the generation across a real 30-second pause.
     Socket longPause(1, false, true);

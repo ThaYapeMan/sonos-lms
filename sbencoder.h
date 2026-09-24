@@ -60,6 +60,7 @@ public:
     // whose reader must still be allowed to drain: stop accepting writes,
     // never touch the reader side.
     void retireProducer() { m_producerRetired.store(true); }
+    void resumeProducer() { m_producerRetired.store(false); }
     bool producerRetired() const { return m_producerRetired.load(); }
 
     // The HTTP response itself has ended (client gone) — distinct from
