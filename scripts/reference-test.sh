@@ -13,7 +13,7 @@
 #   UPSTREAM=http://some.station/stream.mp3 scripts/reference-test.sh
 #
 # Settings (environment):
-#   UPSTREAM     live station URL, http or https (default: Radio Paradise FLAC, see below)
+#   UPSTREAM     live station URL, http or https (default: Radio Paradise MP3 192k)
 #   SONOS_IP     speaker to use                     (default: 192.168.178.132, Study)
 #   ROOM         bridge room to stop meanwhile      (default: Study)
 #   HOST_IP      this host's address as Sonos sees it (default: first of hostname -I)
@@ -23,12 +23,15 @@
 #   MIME         content type announced to Sonos    (default: the station's own)
 #   NO_PCAP      1 = skip tcpdump
 #
-# Check the Radio Paradise URL on https://radioparadise.com/listen/stream-links;
-# any live http(s) station works (an MP3 station is a useful second reference).
+# Why MP3 by default: Sonos accepts an MP3 live stream as "radio"; Radio
+# Paradise's /flac is Ogg FLAC, which Sonos rejected on 2026-09-24 (HEAD + RST
+# after 8 KB, "not encoded correctly"). Other stations: see
+# https://radioparadise.com/listen/stream-links -- any live http(s) station works.
+# Sound quality is irrelevant here; only the pause/resume behaviour matters.
 
 set -uo pipefail
 
-UPSTREAM=${UPSTREAM:-http://stream.radioparadise.com/flac}
+UPSTREAM=${UPSTREAM:-http://stream.radioparadise.com/mp3-192}
 SONOS_IP=${SONOS_IP:-192.168.178.132}
 ROOM=${ROOM:-Study}
 PORT=${PORT:-8990}
