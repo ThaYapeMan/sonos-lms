@@ -78,16 +78,34 @@ seeks. Re-priming a pause-ended response uses the same current URL and ID.
    its own radio, without starting LMS playback. Startup q commands must log
    `transport ignored before first bridge stream`; radio must not be paused.
 
-Only the newest same-ID connection receives PCM. A genuine older reader stays
-open until the client closes or the existing sub-five-second idle limit expires.
-Exception: SameURL resume cancels the current held GET before PlayStream when
-it has produced no audio and its response has not ended. Active audio is never
-cancelled by this hook, and the five-second resume safety deadline is unchanged.
-Both normal GETs get headers promptly; a GET arriving while LMS is still paused
-allows five seconds for the play → LMS CLI → strm u → PCM round trip. If no
-audio arrives in those five seconds, return HTTP 503 as the explicit timeout
-exception. Pause ends all current-ID responses cleanly, preserving the ID.
-Only an older stream ID redirects directly to the current URL after a restart.
+Each GET has a unique request ID. For the current stream, exactly one GET is
+ACTIVE; extras are STANDBY. Expect `stream N: GET #id ACTIVE` for the first
+request and `stream N: GET #id STANDBY` for extras. STANDBY sends no headers or
+audio and never replaces the active encoder. If Sonos closes a standby, expect
+`standby closed by client` and no bytes written; ACTIVE must continue without
+an audio gap. If ACTIVE ends by client close, idle timeout, send error, or
+encoder error, the newest standby is `promoted` to ACTIVE with a fresh encoder,
+HTTP headers, FLAC header, and audio. Verify both close orders. After 30 seconds
+still on standby while ACTIVE streams, expect `standby timeout` and a silent
+disconnect. A stream change redirects remaining standbys to the new URL (302)
+and cancels the old active stream as before.
+
+This replaces the initial import's (`f1eb715`) unsupported requirement that
+both GETs receive headers promptly. Physical tests on 2026-09-24 showed Sonos
+opening two same-stream GETs and closing either one within milliseconds; in one
+case it closed the newer GET before our response arrived. The original upstream
+README also records that rejecting the second request and serving the first
+works. These observations support retaining the first active request and keeping
+extras on standby until needed, rather than inferring ownership from socket state.
+
+A **held GET** still means an ACTIVE request waiting for PCM while LMS is paused;
+it does not mean STANDBY. SameURL resume cancels that held GET before PlayStream
+when it has produced no audio and its response has not ended. Active audio is
+never cancelled by this hook. The held GET still allows five seconds for the
+play → LMS CLI → strm u → PCM round trip, then returns HTTP 503 if no audio
+arrives. Pause ends the active response cleanly and disconnects existing
+standbys without bytes or promotion, preserving the ID and pause-ended state.
+Later GETs may become active and wait for resume audio as before.
 
 A detected device resume reissues the current URL via PlayStream regardless
 of whether a GET is open, unless a new stream is still pending. This also
@@ -95,9 +113,11 @@ applies in `ERROR_LOST_CONNECTION`. Verify audio and `OK` without a second
 pause/play cycle.
 
 Local tests exercise the real HTTP broker with simulated sockets and decode its
-FLAC; they cover both headers, client-owned probe closure, continued new-reader
-audio, retained EOF state across reconnects, 30-second pause, idle limits, and
-q/s cancellation versus delayed genuine stop. They cannot prove physical Sonos
+FLAC; they cover silent standby closure, uninterrupted active audio, promotion
+with fresh FLAC after client close, idle timeout or send failure, newest-request
+selection, stream changes, retained EOF state across reconnects, 30-second pause,
+standby safety limits, idle limits, and q/s cancellation versus delayed genuine
+stop. They cannot prove physical Sonos
 status, audible stutter, or network command latency.
 
 Resume decision table:
@@ -109,9 +129,11 @@ Resume decision table:
 | Open GET present without a detected device resume | Feed that GET; do not issue PlayStream |
 | No open GET | PlayStream with the same URL |
 
-Never more than one action per `u`. A GET must never end without audio unless
-its client closes it, except for HTTP 503 after five seconds without PCM or
-prompt cancellation of a speculative held GET before a SameURL resume. An
+Never more than one action per `u`. An ACTIVE GET must never end without audio
+unless its client closes it, except for HTTP 503 after five seconds without PCM
+or prompt cancellation of a speculative held GET before a SameURL resume.
+STANDBY requests may disconnect silently on client close, pause, or the
+30-second safety limit; obsolete stream IDs redirect as described above. An
 ended-response flag must not override a pending new stream or an ordinary LMS
 unpause into an open GET.
 

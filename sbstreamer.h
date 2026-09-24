@@ -13,7 +13,6 @@
 #ifndef SBSTREAMER_H
 #define SBSTREAMER_H
 
-#include "locked.h"
 #include "requestbroker.h"
 
 #include <vector>
@@ -41,13 +40,11 @@ public:
 
 private:
     ResourceList m_resources;
-    LockedNumber<int> m_playbackCount;
 
     void streamSqueezeBox(handle* handle, int stream);
     static bool sendChunk(handle* h, const char* data, size_t size);
 
     void Reply400(handle* handle);
-    void Reply429(handle* handle);
 
     std::string getParamValue(const std::vector<std::string>& params, const std::string& name);
 };

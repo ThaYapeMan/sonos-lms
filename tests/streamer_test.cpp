@@ -70,7 +70,7 @@ public:
         memcpy(buf, input.data() + offset, n); offset += n; return n;
     }
     bool SendData(const char* data, size_t n) override {
-        if (drop || clientClosed.load()) return false;
+        if (drop || clientClosed.load() || sendError.load()) return false;
         wire.append(data, n);
         if (n == 5 && memcmp(data, "0\r\n\r\n", 5) == 0) {
             assert(!disconnected); eof = true; return true;
@@ -85,7 +85,10 @@ public:
         if (phase == 1) {
             body.insert(body.end(), data, data + n);
             if (n > 2 && (unsigned char)data[0] == 0xff && ((unsigned char)data[1] & 0xfe) == 0xf8)
+            {
                 audioSeen = true;
+                ++audioPackets;
+            }
         }
         phase = (phase + 1) % 3;
         if (phase == 0 && audioSeen && !stayOpen) { drop = true; return false; }
@@ -93,7 +96,8 @@ public:
     }
     bool IsValid() const override { return !disconnected.load() && !clientClosed.load(); }
     void Disconnect() override { disconnected = true; }
-    std::atomic<bool> clientClosed{false};
+    std::atomic<bool> clientClosed{false}, sendError{false};
+    std::atomic<unsigned> audioPackets{0};
     std::atomic<bool> headersSent{false}, audioSeen{false}, eof{false}, disconnected{false};
     std::string headers, wire;
     std::vector<char> body;
@@ -145,6 +149,18 @@ static void playable(const Socket& socket, int first) {
     assert(decoder.process_until_end_of_stream());
     assert(!decoder.error && decoder.frames && decoder.first == first);
     decoder.finish();
+}
+template<typename Predicate>
+static void waitUntil(Predicate ready) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!ready()) {
+        assert(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+static void ready(std::future<void>& request) {
+    assert(request.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    request.get();
 }
 static void connection(SBStreamer& broker, Socket& socket, int first, bool held = false) {
     auto http = std::async(std::launch::async, [&] { serve(broker, socket); });
@@ -258,59 +274,106 @@ int main(int argc, char**) {
     assert(generation == 1 && resumeCommands == 1);
     std::cout << "PASS: device transition plus strm p sends one play; held GET closes promptly, fresh same-ID GET carries audio\n";
 
-    Socket predecessor(1, false, true), replacement(1, false, true);
-    auto oldGet = std::async(std::launch::async, [&] { serve(broker, predecessor); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    assert(predecessor.headersSent && !predecessor.disconnected && !predecessor.eof);
-    auto newGet = std::async(std::launch::async, [&] { serve(broker, replacement); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    assert(replacement.headersSent && !predecessor.disconnected && !predecessor.eof);
-    assert(squeezebox_response_open(1));
-    feed(500);
-    auto audioLimit = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-    while (!replacement.audioSeen && std::chrono::steady_clock::now() < audioLimit)
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    assert(replacement.audioSeen && !predecessor.audioSeen);
-    assert(!predecessor.disconnected && !predecessor.eof);
-    predecessor.clientClosed = true;
-    assert(oldGet.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
-    oldGet.get();
-    assert(!predecessor.eof); // no server EOF before the client's close
-    assert(!replacement.disconnected && !replacement.eof);
-    feed(501); // the newest connection continues receiving PCM
-    std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    assert(!replacement.disconnected && !replacement.eof);
-    replacement.clientClosed = true;
-    assert(newGet.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
-    newGet.get();
-    playable(replacement, 500);
-    assert(generation == 1 && resumeCommands == 1);
-    std::cout << "PASS: both GETs get headers; client closes the older; newest keeps streaming\n";
-
+    // Sonos may close the newer GET before it receives any response. That
+    // standby must not steal PCM or interrupt the original encoder.
     Socket survivor(1, false, true), shortLived(1, false, true);
     auto survivingGet = std::async(std::launch::async, [&] { serve(broker, survivor); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    assert(survivor.headersSent);
-    auto shortGet = std::async(std::launch::async, [&] { serve(broker, shortLived); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    assert(shortLived.headersSent && !survivor.disconnected);
+    waitUntil([&] { return survivor.headersSent.load(); });
     feed(510);
-    std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    assert(shortLived.audioSeen && !survivor.audioSeen);
+    waitUntil([&] { return survivor.audioSeen.load(); });
+    auto shortGet = std::async(std::launch::async, [&] { serve(broker, shortLived); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    assert(!shortLived.headersSent && !survivor.disconnected);
     shortLived.clientClosed = true;
-    assert(shortGet.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
-    shortGet.get();
-    // Keep feeding beyond the original four-second idle deadline.
+    ready(shortGet);
+    assert(shortLived.wire.empty());
+    // Keep feeding past the existing idle deadline; every batch must still
+    // reach the original request promptly, with no ownership-induced gap.
     for (int n = 0; n < 10; ++n) {
+        unsigned before = survivor.audioPackets;
         feed(520 + n);
+        waitUntil([&] { return survivor.audioPackets > before; });
         std::this_thread::sleep_for(std::chrono::milliseconds(450));
         assert(!survivor.disconnected && !survivor.eof);
     }
-    assert(survivor.audioSeen);
     survivor.clientClosed = true;
-    survivingGet.get();
-    playable(survivor, 520);
-    std::cout << "PASS: client closes newest GET; surviving first GET receives PCM beyond idle deadline\n";
+    ready(survivingGet);
+    playable(survivor, 510);
+    std::cout << "PASS: newer standby closes without bytes; original GET receives uninterrupted PCM beyond idle deadline\n";
+
+    // All non-pause exits promote by request ID, including exits where the
+    // socket still appears connected. Each successor starts fresh FLAC.
+    for (const std::string reason : {"client close", "idle timeout", "send error"}) {
+        Socket active(1, false, true), standby(1, false, true);
+        auto first = std::async(std::launch::async, [&] { serve(broker, active); });
+        waitUntil([&] { return active.headersSent.load(); });
+        feed(530);
+        waitUntil([&] { return active.audioSeen.load(); });
+        auto second = std::async(std::launch::async, [&] { serve(broker, standby); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        assert(!standby.headersSent && !standby.audioSeen);
+        if (reason == "client close") active.clientClosed = true;
+        if (reason == "send error") {
+            active.sendError = true; // IsValid still true: no peerClosed shortcut
+            feed(531);
+        }
+        assert(first.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        first.get();
+        if (reason != "client close") assert(!active.clientClosed);
+        waitUntil([&] { return standby.headersSent.load(); });
+        assert(squeezebox_response_open(1));
+        feed(540);
+        waitUntil([&] { return standby.audioSeen.load(); });
+        standby.clientClosed = true;
+        ready(second);
+        playable(standby, 540);
+        assert(generation == 1 && resumeCommands == 1);
+        std::cout << "PASS: active " << reason << " promotes standby with fresh FLAC and audio\n";
+    }
+
+    // With several extras, promotion always selects the newest request ID.
+    Socket first(1, false, true), middle(1, false, true), newest(1, false, true);
+    auto firstGet = std::async(std::launch::async, [&] { serve(broker, first); });
+    waitUntil([&] { return first.headersSent.load(); });
+    auto middleGet = std::async(std::launch::async, [&] { serve(broker, middle); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    auto newestGet = std::async(std::launch::async, [&] { serve(broker, newest); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    assert(!middle.headersSent && !newest.headersSent);
+    first.clientClosed = true;
+    ready(firstGet);
+    waitUntil([&] { return newest.headersSent.load(); });
+    assert(!middle.headersSent);
+    middle.clientClosed = true;
+    ready(middleGet);
+    assert(middle.wire.empty());
+    feed(550);
+    waitUntil([&] { return newest.audioSeen.load(); });
+    newest.clientClosed = true;
+    ready(newestGet);
+    playable(newest, 550);
+    std::cout << "PASS: newest standby wins promotion; closing older standby leaves ACTIVE untouched\n";
+
+    Socket streaming(1, false, true), staleStandby(1, false, true);
+    auto streamingGet = std::async(std::launch::async, [&] { serve(broker, streaming); });
+    waitUntil([&] { return streaming.headersSent.load(); });
+    feed(560);
+    waitUntil([&] { return streaming.audioSeen.load(); });
+    auto standbyStart = std::chrono::steady_clock::now();
+    auto staleGet = std::async(std::launch::async, [&] { serve(broker, staleStandby); });
+    while (staleGet.wait_for(std::chrono::milliseconds(200)) != std::future_status::ready) {
+        assert(std::chrono::steady_clock::now() - standbyStart < std::chrono::seconds(32));
+        assert(!staleStandby.headersSent && !streaming.disconnected);
+        feed(561);
+    }
+    staleGet.get();
+    assert(std::chrono::steady_clock::now() - standbyStart >= std::chrono::seconds(30));
+    assert(staleStandby.disconnected && staleStandby.wire.empty());
+    assert(!streaming.disconnected && squeezebox_response_open(1));
+    streaming.clientClosed = true;
+    ready(streamingGet);
+    playable(streaming, 560);
+    std::cout << "PASS: standby disconnects without bytes after 30 seconds; ACTIVE keeps streaming\n";
 
     // An established response ends immediately after Pause, including a read
     // already waiting for PCM. Keep the generation across a real 30-second pause.
@@ -326,7 +389,13 @@ int main(int argc, char**) {
         std::lock_guard<std::mutex> lock(stateMutex);
         state.command('p'); deviceState = "PAUSED_PLAYBACK"; paused = true;
     }
-    end_squeezebox_response(); // called AFTER UPnP Pause in production
+    Socket pauseStandby(1, false, true);
+    auto pauseExtra = std::async(std::launch::async, [&] { serve(broker, pauseStandby); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    assert(!pauseStandby.headersSent);
+    end_squeezebox_response(); // production ends HTTP BEFORE the blocking UPnP Pause
+    ready(pauseExtra);
+    assert(pauseStandby.wire.empty() && pauseStandby.disconnected);
     assert(playing.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready);
     playing.get();
     assert(longPause.eof && longPause.disconnected && generation == 1);
@@ -365,7 +434,29 @@ int main(int argc, char**) {
     assert(timeout.body.empty() && generation == 1 && resumeCommands == 1);
     std::cout << "PASS: paused GET without PCM receives HTTP 503 after five seconds\n";
 
+    // A new generation cancels ACTIVE and redirects STANDBY, without letting
+    // either old worker reset the new generation's encoder on cleanup.
+    paused = false;
+    Socket oldActive(1, false, true), oldStandby(1, false, true), newStream(2, false, true);
+    auto oldActiveGet = std::async(std::launch::async, [&] { serve(broker, oldActive); });
+    waitUntil([&] { return oldActive.headersSent.load(); });
+    auto oldStandbyGet = std::async(std::launch::async, [&] { serve(broker, oldStandby); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    assert(!oldStandby.headersSent);
     generation = 2;
+    auto newStreamGet = std::async(std::launch::async, [&] { serve(broker, newStream); });
+    ready(oldActiveGet);
+    ready(oldStandbyGet);
+    assert(oldStandby.headers.find("302 Found") != std::string::npos);
+    assert(oldStandby.headers.find("Location: " + SqueezeBoxURL(2)) != std::string::npos);
+    waitUntil([&] { return newStream.headersSent.load(); });
+    feed(850);
+    waitUntil([&] { return newStream.audioSeen.load(); });
+    newStream.clientClosed = true;
+    ready(newStreamGet);
+    playable(newStream, 850);
+    paused = true;
+    std::cout << "PASS: new stream cancels old ACTIVE, redirects STANDBY, and retains its own PCM owner\n";
     Socket older(1);
     serve(broker, older);
     assert(older.headers.find("302 Found") != std::string::npos);

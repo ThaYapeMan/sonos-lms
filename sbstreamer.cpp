@@ -40,16 +40,41 @@
 #define SBSTREAMER_HTTP_IDLE_TIMEOUT 4000
 // Allow the device play -> LMS CLI -> strm u round trip a full five seconds.
 #define SBSTREAMER_RESUME_TIMEOUT 5000
-#define SBSTREAMER_MAX_PLAYBACK 3
+#define SBSTREAMER_STANDBY_TIMEOUT 30000
 #define SBSTREAMER_CHUNK 16384
 
 using namespace NSROOT;
 
-// The LMS generation outlives every HTTP connection. Each new connection owns
-// a fresh FLAC encoder in that generation; the producer follows the active one.
+// The LMS generation outlives every HTTP connection. Each ACTIVE request owns
+// a fresh FLAC encoder in that generation; STANDBY requests have no encoder.
 static std::shared_ptr<SBEncoder> g_enc;
 static std::mutex g_enc_mutex;
-static std::vector<std::weak_ptr<SBEncoder>> connections;
+// Ownership is independent of socket state. All request fields and slots are
+// protected by g_enc_mutex; only ACTIVE requests have an encoder.
+struct StreamRequest {
+    unsigned long long id;
+    unsigned stream;
+    std::shared_ptr<SBEncoder> encoder;
+    bool opened = false;
+    bool pauseEnded = false;
+};
+static unsigned long long nextRequestId = 0;
+static unsigned ownershipStream = 0;
+static std::shared_ptr<StreamRequest> activeRequest;
+static std::vector<std::shared_ptr<StreamRequest>> standbyRequests;
+
+// Caller holds g_enc_mutex, including when promoting a standby. Publish the
+// fresh encoder and its owner together so PCM always goes to the ACTIVE request.
+static void activateRequest(const std::shared_ptr<StreamRequest>& request, bool promoted)
+{
+    request->encoder = std::make_shared<SBEncoder>(request->stream);
+    request->opened = request->encoder->open();
+    activeRequest = request;
+    g_enc = request->encoder;
+    if (promoted)
+        printf("stream %u: GET #%llu promoted\n", request->stream, request->id);
+    printf("stream %u: GET #%llu ACTIVE\n", request->stream, request->id);
+}
 static unsigned endedByPause = 0;
 extern void ResumeSqueezeBox(unsigned current);
 extern std::string SqueezeBoxURL(unsigned current);
@@ -64,9 +89,12 @@ void end_squeezebox_response(void)
 {
     std::lock_guard<std::mutex> lock(g_enc_mutex);
     endedByPause = get_squeezebox_stream_id();
-    for (auto& connection : connections)
-        if (auto enc = connection.lock())
-            if (enc->streamId() == endedByPause) enc->endResponse();
+    if (g_enc && g_enc->streamId() == endedByPause) g_enc->endResponse();
+    // A pause ends existing requests, not a handoff to a standby. Standbys
+    // have sent no headers and disconnect silently; later GETs may wait for PCM.
+    for (auto& request : standbyRequests)
+        request->pauseEnded = true;
+    standbyRequests.clear();
 }
 
 int squeezebox_response_open(unsigned stream)
@@ -111,8 +139,8 @@ void encode_squeezebox_audio(const char* data, int len)
         if (enc && enc->streamId() == stream && !enc->cancelled() && !enc->responseEnded() && !enc->producerRetired()) {
             int written = enc->write(data, len, SBSTREAMER_TIMEOUT);
             if (written == len) return;
-            // A probe, real GET, or resume may replace the connection while
-            // write waits. Retry the SAME PCM block on the new encoder.
+            // Active-request termination or resume may replace the encoder
+            // while write waits. Retry the SAME PCM block on the new encoder.
             if (!enc->cancelled() && !enc->responseEnded() && !enc->producerRetired()) {
                 printf("encode_squeezebox_audio: write() failed %d != %d\n", written, len);
                 return;
@@ -132,7 +160,6 @@ void encode_squeezebox_audio(const char* data, int len)
 SBStreamer::SBStreamer(RequestBroker* imageService)
     : RequestBroker()
     , m_resources()
-    , m_playbackCount(0)
 {
     ResourcePtr icon;
     if (imageService) {
@@ -236,125 +263,153 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
         return result == 0 || (result < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR);
     };
 
+    auto request = std::make_shared<StreamRequest>();
+    {
+        std::lock_guard<std::mutex> lock(g_enc_mutex);
+        request->id = ++nextRequestId;
+        request->stream = stream;
+    }
     unsigned current = get_squeezebox_stream_id();
     if (stream <= 0 || (unsigned)stream > current) {
         Reply400(handle);
         return;
     }
-    // Only superseded LMS streams redirect. Current-ID GETs (including the
-    // normal probe/second GET and either kind of resume) NEVER change the ID.
-    if ((unsigned)stream < current) {
-        std::string url = SqueezeBoxURL(current);
-        // Preserve the existing reason phrase (noson uses "Moved temporarily").
-        std::string redirect = "HTTP/1.1 302 Found\r\nLocation: " + url
+    auto redirect = [&] {
+        std::string url = SqueezeBoxURL(get_squeezebox_stream_id());
+        std::string response = "HTTP/1.1 302 Found\r\nLocation: " + url
             + "\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
         printf("stream %d: HTTP 302 -> %s\n", stream, url.c_str());
-        handle->broker->ReplyData(redirect.c_str(), redirect.size());
+        handle->broker->ReplyData(response.c_str(), response.size());
+    };
+    if ((unsigned)stream < current) {
+        redirect();
         return;
     }
 
-    m_playbackCount.Add(1);
-    if (m_playbackCount.Load() > SBSTREAMER_MAX_PLAYBACK) {
-        Reply429(handle);
-    } else {
-        auto enc = std::make_shared<SBEncoder>(stream);
-        bool opened = enc->open();
-        if (opened) {
-            std::lock_guard<std::mutex> lock(g_enc_mutex);
-            // A track change may have won the race since request validation.
-            // Never let an old GET cancel the newer generation's connection.
-            if ((unsigned)stream == get_squeezebox_stream_id()) {
-                if (g_enc) {
-                    if (g_enc->streamId() == (unsigned)stream)
-                        g_enc->retireProducer(); // stop feeding, NEVER cancel its reader
-                    else
-                        g_enc->cancel();
-                }
-                g_enc = enc;
-                connections.erase(std::remove_if(connections.begin(), connections.end(),
-                    [](const std::weak_ptr<SBEncoder>& c) { return c.expired(); }), connections.end());
-                connections.push_back(enc);
+    {
+        std::lock_guard<std::mutex> lock(g_enc_mutex);
+        // A track change may have won the race since request validation.
+        if ((unsigned)stream == get_squeezebox_stream_id()) {
+            if (ownershipStream != (unsigned)stream) {
+                if (g_enc) g_enc->cancel();
+                activeRequest.reset();
+                standbyRequests.clear(); // old workers redirect on their next poll
+                ownershipStream = stream;
+            }
+            // Preserve pause-ended encoders until a later GET replaces them.
+            if (activeRequest && activeRequest->encoder->responseEnded())
+                activeRequest.reset();
+            if (!activeRequest) {
+                activateRequest(request, false);
             } else {
-                opened = false;
+                standbyRequests.push_back(request);
+                printf("stream %d: GET #%llu STANDBY\n", stream, request->id);
             }
         }
-
-        // A running stream's probe and real GET both get fresh FLAC headers
-        // immediately. Only a GET arriving before LMS unpause waits for strm u.
-        // Same-ID predecessors retain their reader until the client closes or
-        // the existing idle deadline expires; only the newest receives PCM.
-        bool waitForResumeAudio = sonos_lms_is_paused();
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(SBSTREAMER_RESUME_TIMEOUT);
-        while (opened && waitForResumeAudio && !enc->hasAudio() && !enc->cancelled() && !enc->responseEnded() && !IsAborted() && !peerClosed()
-               && (unsigned)stream == get_squeezebox_stream_id()
-               && std::chrono::steady_clock::now() < deadline) {
-            ResumeSqueezeBox(stream);
-            usleep(10000);
-        }
-        char buf[SBSTREAMER_CHUNK];
-        int r = 0;
-        if (opened && (!waitForResumeAudio || enc->hasAudio()) && !enc->cancelled())
-            r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed);
-        const std::string streamingHeaders = "HTTP/1.1 200 OK\r\nServer: libnoson/" LIBVERSION "\r\nConnection: close\r\n"
-            "Content-Type: audio/flac\r\nTransfer-Encoding: chunked\r\n\r\n";
-        if (r < 4 || memcmp(buf, "fLaC", 4) != 0) {
-            printf("stream %d: no audio before timeout or connection replaced\n", stream);
-            std::string error = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            const auto mode = deviceResumeStrategy();
-            if (enc->cancelled() && !enc->hasAudio() && mode == DeviceResume::SameURLClose) {
-                // Deliberately disconnect without HTTP bytes.
-            } else if (enc->cancelled() && !enc->hasAudio() && mode == DeviceResume::SameURLEmpty200) {
-                if (handle->broker->ReplyData(streamingHeaders.c_str(), streamingHeaders.size()))
-                    handle->broker->ReplyData("0\r\n\r\n", 5);
-            } else {
-                handle->broker->ReplyData(error.c_str(), error.size());
-            }
-        } else {
-            printf("stream %d: serving current generation with fresh FLAC header\n", stream);
-            if (handle->broker->ReplyData(streamingHeaders.c_str(), streamingHeaders.size()) && sendChunk(handle, buf, r)) {
-                while (!IsAborted() && (r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed)) > 0) {
-                    if (!sendChunk(handle, buf, r)) break;
-                }
-                handle->broker->ReplyData("0\r\n\r\n", 5);
-            }
-        }
-        const bool clientClosed = peerClosed();
-        if (clientClosed) printf("stream %d: client closed connection\n", stream);
-        {
-            std::lock_guard<std::mutex> lock(g_enc_mutex);
-            const bool restore = clientClosed && !enc->cancelled() && !enc->responseEnded()
-                && (unsigned)stream == get_squeezebox_stream_id();
-            // Remove this reader before another worker can select it for feeding.
-            connections.erase(std::remove_if(connections.begin(), connections.end(),
-                [&](const std::weak_ptr<SBEncoder>& c) {
-                    auto candidate = c.lock();
-                    return !candidate || candidate == enc;
-                }), connections.end());
-            if (!enc->responseEnded()) {
-                enc->cancel();
-                if (g_enc == enc) {
-                    g_enc.reset();
-                    if (restore) {
-                        for (auto it = connections.rbegin(); it != connections.rend(); ++it) {
-                            auto candidate = it->lock();
-                            if (candidate && candidate->streamId() == (unsigned)stream
-                                && !candidate->cancelled() && !candidate->responseEnded()) {
-                                candidate->resumeProducer();
-                                g_enc = candidate;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // Preserve paused encoders and send EOF before disconnecting.
-        handle->broker->Socket()->Disconnect();
-        if (!enc->responseEnded()) enc->close();
-        printf("stream %d: done\n", stream);
     }
 
-    m_playbackCount.Sub(1);
+    std::shared_ptr<SBEncoder> enc;
+    bool opened = false;
+    auto standbyDeadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(SBSTREAMER_STANDBY_TIMEOUT);
+    for (;;) {
+        bool obsolete = false, disconnect = false;
+        {
+            std::lock_guard<std::mutex> lock(g_enc_mutex);
+            obsolete = (unsigned)stream != get_squeezebox_stream_id();
+            // An activated request must always take the active cleanup path,
+            // even if its peer closes immediately after promotion.
+            if (request->encoder) {
+                enc = request->encoder;
+                opened = request->opened;
+                break;
+            }
+            if (peerClosed()) {
+                printf("stream %d: GET #%llu standby closed by client\n", stream, request->id);
+                disconnect = true;
+            } else if (!obsolete && !request->pauseEnded && !IsAborted()
+                       && !sonos_lms_is_paused() && activeRequest
+                       && activeRequest->encoder->hasAudio()
+                       && std::chrono::steady_clock::now() >= standbyDeadline) {
+                printf("stream %d: GET #%llu standby timeout\n", stream, request->id);
+                disconnect = true;
+            }
+            disconnect = disconnect || request->pauseEnded || IsAborted();
+            if (obsolete || disconnect)
+                standbyRequests.erase(std::remove(standbyRequests.begin(), standbyRequests.end(), request),
+                                      standbyRequests.end());
+        }
+        if (disconnect || obsolete) {
+            if (obsolete && !disconnect) redirect();
+            handle->broker->Socket()->Disconnect();
+            return;
+        }
+        usleep(5000);
+    }
+
+    // Only ACTIVE gets an encoder and headers. A held GET still means an
+    // ACTIVE request waiting for PCM while LMS is paused, never a standby.
+    bool waitForResumeAudio = sonos_lms_is_paused();
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(SBSTREAMER_RESUME_TIMEOUT);
+    while (opened && waitForResumeAudio && !enc->hasAudio() && !enc->cancelled() && !enc->responseEnded() && !IsAborted() && !peerClosed()
+           && (unsigned)stream == get_squeezebox_stream_id()
+           && std::chrono::steady_clock::now() < deadline) {
+        ResumeSqueezeBox(stream);
+        usleep(10000);
+    }
+    char buf[SBSTREAMER_CHUNK];
+    int r = 0;
+    if (opened && (!waitForResumeAudio || enc->hasAudio()) && !enc->cancelled())
+        r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed);
+    const std::string streamingHeaders = "HTTP/1.1 200 OK\r\nServer: libnoson/" LIBVERSION "\r\nConnection: close\r\n"
+        "Content-Type: audio/flac\r\nTransfer-Encoding: chunked\r\n\r\n";
+    if (r < 4 || memcmp(buf, "fLaC", 4) != 0) {
+        printf("stream %d: no audio before timeout or connection replaced\n", stream);
+        std::string error = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        const auto mode = deviceResumeStrategy();
+        if (enc->cancelled() && !enc->hasAudio() && mode == DeviceResume::SameURLClose) {
+            // Deliberately disconnect without HTTP bytes.
+        } else if (enc->cancelled() && !enc->hasAudio() && mode == DeviceResume::SameURLEmpty200) {
+            if (handle->broker->ReplyData(streamingHeaders.c_str(), streamingHeaders.size()))
+                handle->broker->ReplyData("0\r\n\r\n", 5);
+        } else {
+            handle->broker->ReplyData(error.c_str(), error.size());
+        }
+    } else {
+        printf("stream %d: serving current generation with fresh FLAC header\n", stream);
+        if (handle->broker->ReplyData(streamingHeaders.c_str(), streamingHeaders.size()) && sendChunk(handle, buf, r)) {
+            while (!IsAborted() && (r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed)) > 0) {
+                if (!sendChunk(handle, buf, r)) break;
+            }
+            handle->broker->ReplyData("0\r\n\r\n", 5);
+        }
+    }
+    if (peerClosed()) printf("stream %d: client closed connection\n", stream);
+    {
+        std::lock_guard<std::mutex> lock(g_enc_mutex);
+        const bool pauseEnded = enc->responseEnded();
+        if (!pauseEnded) enc->cancel();
+        if (activeRequest == request) {
+            activeRequest.reset();
+            if (!pauseEnded) {
+                if (g_enc == enc) g_enc.reset();
+                if ((unsigned)stream == get_squeezebox_stream_id() && !standbyRequests.empty()) {
+                    auto newest = std::max_element(standbyRequests.begin(), standbyRequests.end(),
+                        [](const std::shared_ptr<StreamRequest>& a, const std::shared_ptr<StreamRequest>& b) {
+                            return a->id < b->id;
+                        });
+                    auto promoted = *newest;
+                    standbyRequests.erase(newest);
+                    activateRequest(promoted, true);
+                }
+            }
+        }
+    }
+    // Preserve paused encoders and send EOF before disconnecting.
+    handle->broker->Socket()->Disconnect();
+    if (!enc->responseEnded()) enc->close();
+    printf("stream %d: done\n", stream);
+
     printf("Done serving stream %d to Sonos\n", stream);
 }
 
@@ -362,12 +417,6 @@ void SBStreamer::Reply400(handle* handle)
 {
     WSRequestReply reply(*handle->broker);
     reply.PostReply(WS_STATUS_400_Bad_Request);
-}
-
-void SBStreamer::Reply429(handle* handle)
-{
-    WSRequestReply reply(*handle->broker);
-    reply.PostReply(WS_STATUS_429_Too_Many_Requests);
 }
 
 std::string SBStreamer::getParamValue(const std::vector<std::string>& params, const std::string& name)
