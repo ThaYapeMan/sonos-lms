@@ -187,11 +187,6 @@ display and the Sonos app show title and cover art correctly, but the artist/alb
 lines stay blank. Fixing this needs either an extension to noson's `PlayStream()`
 or a hand-built DIDL payload that bypasses it.
 
-**Logging goes quiet under systemd.** stdout is fully buffered once nothing is
-attached to a terminal, which is exactly the systemd case -- `journalctl` shows
-nothing until the process actually exits. `ss -tnp` is the practical way to check
-connection state on a running instance in the meantime.
-
 **In-stream metadata updates don't work.** Updating the "now playing" title
 mid-stream (without restarting it) was attempted via Shoutcast-style ICY metadata
 injection into the FLAC stream -- the mechanism itself was fully implemented and
