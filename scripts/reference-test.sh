@@ -20,6 +20,7 @@
 #   PORT         relay port                          (default: 8990)
 #   ROUNDS       pause/resume rounds                 (default: 3)
 #   PAUSE_SECS   seconds to stay paused per round    (default: 10)
+#   MIME         content type announced to Sonos    (default: the station's own)
 #   NO_PCAP      1 = skip tcpdump
 #
 # Check the Radio Paradise URL on https://radioparadise.com/listen/stream-links;
@@ -68,7 +69,9 @@ soap() {  # soap <action> <inner xml>
         -H "SOAPAction: \"urn:schemas-upnp-org:service:AVTransport:1#$1\"" \
         --data "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:$1 xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\"><InstanceID>0</InstanceID>$2</u:$1></s:Body></s:Envelope>"
 }
-xml_escape() { local s=$1; s=${s//&/&amp;}; s=${s//</&lt;}; s=${s//>/&gt;}; s=${s//\"/&quot;}; printf '%s' "$s"; }
+# sed, not ${var//x/y}: since bash 5.2 an "&" in that replacement means "the
+# matched text", which turned "&lt;" into "<lt;" and made Sonos answer 402.
+xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'; }
 
 # "STATE STATUS", e.g. "PLAYING OK" or "STOPPED ERROR_CORRUPT_FILE"
 sonos_state() {
@@ -93,6 +96,9 @@ play_reference() {
     mark "SetAVTransportURI $url (protocolInfo x-rincon-mp3radio:*:$MIME:*)"
     soap SetAVTransportURI "<CurrentURI>$url</CurrentURI><CurrentURIMetaData>$(xml_escape "$didl")</CurrentURIMetaData>" \
         > "$OUT/setavtransporturi.xml"
+    if grep -q '<errorCode>' "$OUT/setavtransporturi.xml"; then
+        mark "SetAVTransportURI REJECTED by Sonos: UPnP error $(sed -n 's:.*<errorCode>\([^<]*\)<.*:\1:p' "$OUT/setavtransporturi.xml")"
+    fi
     mark "Play"
     soap Play "<Speed>1</Speed>" > "$OUT/play.xml"
 }
@@ -126,7 +132,7 @@ UNIT=$(systemd-escape --template=sonos-squeezebox@.service -- "$ROOM" 2>/dev/nul
 
 say "Probing $UPSTREAM ..."
 probe=$(python3 "$HERE/reference-relay.py" --probe --upstream "$UPSTREAM") || fail "station not reachable: $probe"
-MIME=$(sed -n 's/^CONTENT_TYPE=//p' <<<"$probe" | cut -d';' -f1)
+MIME=${MIME:-$(sed -n 's/^CONTENT_TYPE=//p' <<<"$probe" | cut -d';' -f1)}
 FORMAT=$(sed -n 's/^FORMAT=//p' <<<"$probe")
 say "  content type $MIME, format: $FORMAT"
 [[ $(sonos_state) != UNREACHABLE* ]] || fail "no UPnP answer from Sonos at $SONOS_IP"
