@@ -335,10 +335,30 @@ scenario_1() {
 scenario_2() {
     mark "S2 SONOS APP pause/resume x3 on track A"
     setup_playing_a || return 0
-    local i
+    local i st
     for i in 1 2 3; do
-        prompt "S2.$i press PAUSE in the Sonos app"; wait_s 5; snapshot
-        prompt "S2.$i press PLAY in the Sonos app"; wait_s 8; snapshot
+        # Precondition: the speaker really plays the current song. A failed
+        # previous resume must not turn into "pause the silence".
+        if ! wait_sonos PLAYING 5 || ! speaker_on_current_song; then
+            mark "S2.$i NOT PLAYING before pause: speaker=$(sonos_state); $(now_playing)"
+            observe "S2.$i: before this round nothing plays - what do the speaker and app show?"
+            setup_playing_a || { mark "S2 ABORTED: could not restart playback"; return 0; }
+        fi
+        prompt "S2.$i press PAUSE in the Sonos app"
+        if wait_sonos PAUSED_PLAYBACK 10; then
+            mark "S2.$i PAUSE OK: speaker PAUSED_PLAYBACK, lms_mode=$(lms_mode)"
+        else
+            mark "S2.$i PAUSE NOT CONFIRMED: speaker=$(sonos_state), lms_mode=$(lms_mode)"
+        fi
+        wait_s 3; snapshot
+        prompt "S2.$i press PLAY in the Sonos app"
+        if wait_sonos PLAYING 10 && speaker_on_current_song; then
+            mark "S2.$i RESUME OK: $(now_playing)"
+        else
+            st=$(sonos_state)
+            mark "S2.$i RESUME FAIL: speaker=${st:-unknown}, lms_mode=$(lms_mode); $(now_playing)"
+        fi
+        wait_s 5; snapshot
         observe "S2.$i: continued (c), restarted (r), silent (s), error dialog (e)?"
     done
 }
