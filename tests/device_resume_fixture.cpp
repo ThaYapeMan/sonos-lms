@@ -3,12 +3,24 @@
 #include "stop_debounce.h"
 #include <atomic>
 #include <cassert>
+#include <chrono>
+#include <cstdarg>
 #include <cstdio>
 #include <mutex>
 #include <string>
 #include <vector>
 #include <thread>
 static std::atomic<bool> lockHeld{false}, releaseLock{false};
+static std::atomic<bool> releasePlay{true}, playFinished{false};
+
+template<typename Predicate>
+static void waitFor(Predicate ready) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!ready()) {
+        assert(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::yield();
+    }
+}
 
 static std::atomic<bool> ourStreamStarted{true}, lmsPaused{false};
 static std::atomic<unsigned> streamId{6}, lmsStreamSerial{0}, completedStream{6};
@@ -19,7 +31,8 @@ static bool stream_just_restarted() { return false; }
 static bool responseOpen = false, responseEnded = false;
 static bool pauseResult = true;
 static unsigned pauseCalls = 0, responseEnds = 0;
-static unsigned cliPlays = 0, streamPlays = 0, transportPlays = 0;
+static unsigned cliPlays = 0, streamPlays = 0;
+static std::atomic<unsigned> transportPlays{0};
 static unsigned heldGetInvalidations = 0;
 static std::vector<std::string> callOrder;
 struct Transport { std::string TransportState, TransportStatus; };
@@ -41,7 +54,12 @@ struct FakePlayer {
         ++pauseCalls;
         return pauseResult;
     }
-    bool Play() { ++transportPlays; return true; }
+    bool Play() {
+        ++transportPlays;
+        // Model a device withholding its SOAP reply until PCM is released.
+        waitFor([] { return releasePlay.load(); });
+        return true;
+    }
 } player;
 static FakePlayer* gPlayer = &player;
 static int gServer = 0, gMac = 0;
@@ -91,7 +109,30 @@ struct Status {
 };
 }
 
+// Observe completion, including skipped calls, before resetting fixture state.
+static unsigned decisionLogs = 0;
+static int productionPrintf(const char* format, ...) {
+    char message[1024];
+    va_list args;
+    va_start(args, format);
+    int result = vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    fputs(message, stdout);
+    if (std::string(message).find(": decision=") != std::string::npos)
+        ++decisionLogs;
+    if (std::string(message).find("device resume: strategy=playonly Play() ") == 0)
+        playFinished = true;
+    return result;
+}
+#define printf productionPrintf
 #include "production_resume.inc"
+#undef printf
+
+static void finishPlay() {
+    waitFor([] { return playFinished.load(); });
+    // The completion log is inside the transport lock; wait for its release.
+    std::lock_guard<std::mutex> lock(transportMutex);
+}
 
 static void paused(const char* status) {
     resumeState = ResumeState{};
@@ -114,6 +155,11 @@ static void paused(const char* status) {
 }
 
 int main() {
+    sonos_lms_transport('t');
+    assert(decisionLogs == 0);
+    sonos_lms_transport('a');
+    assert(decisionLogs == 1);
+    puts("PASS: heartbeat skips the decision log; other commands retain it");
     if (deviceResumeStrategy() == DeviceResume::PlayOnly) {
         for (bool held : {true, false}) {
             paused("OK");
@@ -121,8 +167,16 @@ int main() {
             player.property.TransportState = "TRANSITIONING";
             ResumeSqueezeBox(6);
             ResumeSqueezeBox(6);
+            playFinished = false;
+            releasePlay = !held;
             sonos_lms_transport('u');
             assert(cliPlays == 1 && !lmsPaused && !responseEnded);
+            if (held) {
+                waitFor([] { return transportPlays.load() == 1; });
+                assert(!playFinished); // callback returned while Play still awaits PCM
+                releasePlay = true; // process_strm can now release PCM into the held GET
+                finishPlay();
+            }
             assert(transportPlays == (held ? 1u : 0u));
             assert(streamPlays == (held ? 0u : 1u));
             assert(heldGetInvalidations == (held ? 0u : 1u));
@@ -138,11 +192,13 @@ int main() {
             while (!releaseLock) std::this_thread::yield();
         });
         while (!lockHeld) std::this_thread::yield();
+        playFinished = false;
         sonos_lms_transport('u');
+        waitFor([] { return playFinished.load(); });
         assert(responseOpen && !lmsPaused && transportPlays == 0 && streamPlays == 0 && heldGetInvalidations == 0);
         releaseLock = true;
         owner.join();
-        puts("PASS: playonly sends one Play with held GET; missing GET falls back; contention skips without blocking");
+        puts("PASS: playonly returns before the Play reply so PCM can flow; sends one Play with held GET; missing GET falls back; contention skips without blocking");
         return 0;
     }
 

@@ -32,6 +32,7 @@ unsigned get_squeezebox_stream_id(void);
 #include <atomic>
 #include <arpa/inet.h>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -115,7 +116,8 @@ extern "C" void sonos_lms_transport(char command)
     case ResumeState::Unpause::SameURL: decision = "SameURL"; break;
     case ResumeState::Unpause::None: break;
     }
-    printf("strm %c: decision=%s stream=%u\n", command, decision, streamId.load());
+    if (command != 't')
+        printf("strm %c: decision=%s stream=%u\n", command, decision, streamId.load());
     if (command == 's') {
         ++lmsStreamSerial; // release a producer waiting on an obsolete HTTP request
         lmsPaused.store(false);
@@ -144,13 +146,20 @@ extern "C" void sonos_lms_transport(char command)
         printf("strm u: feeding held GET, no same-URL resume\n");
         acknowledge_squeezebox_resume(streamId.load());
         if (playOnly) {
-            std::unique_lock<std::mutex> lock(transportMutex, std::try_to_lock);
-            if (lock.owns_lock() && !stream_just_restarted() && gPlayer) {
-                bool ok = gPlayer->Play();
-                printf("device resume: strategy=playonly Play() %s\n", ok ? "sent" : "failed");
-            } else {
-                printf("device resume: strategy=playonly Play() skipped: transport unavailable\n");
-            }
+            auto dispatched = std::chrono::steady_clock::now();
+            // The Play reply may wait for audio: let process_strm release PCM now.
+            std::thread([dispatched] {
+                std::unique_lock<std::mutex> lock(transportMutex, std::try_to_lock);
+                if (lock.owns_lock() && !stream_just_restarted() && gPlayer) {
+                    bool ok = gPlayer->Play();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - dispatched).count();
+                    printf("device resume: strategy=playonly Play() %s after %lldms\n",
+                        ok ? "sent" : "failed", (long long)elapsed);
+                } else {
+                    printf("device resume: strategy=playonly Play() skipped: transport unavailable\n");
+                }
+            }).detach();
         }
         return; // process_strm releases PCM into the existing encoder
     }
