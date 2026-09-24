@@ -12,10 +12,11 @@
 #include <thread>
 static std::atomic<bool> lockHeld{false}, releaseLock{false};
 static std::atomic<bool> releasePlay{true}, playFinished{false};
+static std::string playCompletion;
 
 template<typename Predicate>
-static void waitFor(Predicate ready) {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+static void waitFor(Predicate ready, unsigned timeoutMs = 2000) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     while (!ready()) {
         assert(std::chrono::steady_clock::now() < deadline);
         std::this_thread::yield();
@@ -27,7 +28,7 @@ static std::atomic<unsigned> streamId{6}, lmsStreamSerial{0}, completedStream{6}
 static std::mutex resumeMutex, stopMutex, transportMutex;
 static ResumeState resumeState;
 static StopDebounce deferredStop;
-static bool stream_just_restarted() { return false; }
+static bool stream_just_restarted() { return streamId.load() != completedStream.load(); }
 static bool responseOpen = false, responseEnded = false;
 static bool pauseResult = true;
 static unsigned pauseCalls = 0, responseEnds = 0;
@@ -120,8 +121,10 @@ static int productionPrintf(const char* format, ...) {
     fputs(message, stdout);
     if (std::string(message).find(": decision=") != std::string::npos)
         ++decisionLogs;
-    if (std::string(message).find("device resume: strategy=playonly Play() ") == 0)
+    if (std::string(message).find("device resume: strategy=playonly Play() ") == 0) {
+        playCompletion = message;
         playFinished = true;
+    }
     return result;
 }
 #define printf productionPrintf
@@ -182,23 +185,57 @@ int main() {
             assert(heldGetInvalidations == (held ? 0u : 1u));
             assert(responseOpen == held);
         }
+        for (const std::string outcome : {"released", "changed", "expired"}) {
+            paused("OK");
+            responseOpen = true;
+            player.property.TransportState = "TRANSITIONING";
+            ResumeSqueezeBox(6);
+            lockHeld = releaseLock = false;
+            std::thread owner([] {
+                std::lock_guard<std::mutex> lock(transportMutex);
+                lockHeld = true;
+                while (!releaseLock) std::this_thread::yield();
+            });
+            waitFor([] { return lockHeld.load(); });
+            playFinished = false;
+            auto dispatch = std::chrono::steady_clock::now();
+            sonos_lms_transport('u');
+            assert(responseOpen && !lmsPaused && transportPlays == 0 && streamPlays == 0 && heldGetInvalidations == 0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            assert(!playFinished && transportPlays == 0);
+            if (outcome == "released") {
+                releaseLock = true;
+            } else {
+                if (outcome == "changed") streamId = 7;
+                waitFor([] { return playFinished.load(); }, 4000);
+                assert(transportPlays == 0);
+                if (outcome == "expired")
+                    assert(std::chrono::steady_clock::now() - dispatch >= std::chrono::seconds(3));
+                releaseLock = true;
+            }
+            owner.join();
+            finishPlay();
+            streamId = 6;
+            assert(transportPlays == (outcome == "released" ? 1u : 0u));
+            const char* expected = outcome == "released" ? "sent after " :
+                outcome == "changed" ? "skipped: stream changed" : "skipped: 3 s expired";
+            assert(playCompletion.find(expected) != std::string::npos);
+            printf("PASS: playonly busy transport %s; callback releases PCM immediately\n", outcome.c_str());
+        }
         paused("OK");
         responseOpen = true;
         player.property.TransportState = "TRANSITIONING";
         ResumeSqueezeBox(6);
-        std::thread owner([] {
-            std::lock_guard<std::mutex> lock(transportMutex);
-            lockHeld = true;
-            while (!releaseLock) std::this_thread::yield();
-        });
-        while (!lockHeld) std::this_thread::yield();
+        completedStream = 5; // same ID, but PlayStream has not finished yet
         playFinished = false;
         sonos_lms_transport('u');
-        waitFor([] { return playFinished.load(); });
-        assert(responseOpen && !lmsPaused && transportPlays == 0 && streamPlays == 0 && heldGetInvalidations == 0);
-        releaseLock = true;
-        owner.join();
-        puts("PASS: playonly returns before the Play reply so PCM can flow; sends one Play with held GET; missing GET falls back; contention skips without blocking");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        assert(!playFinished && transportPlays == 0);
+        completedStream = 6;
+        finishPlay();
+        assert(transportPlays == 1);
+        puts("PASS: playonly waits for restart completion, then sends exactly one Play");
+        puts("PASS: playonly returns before the Play reply so PCM can flow; sends one Play with held GET; missing GET falls back");
         return 0;
     }
 

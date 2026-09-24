@@ -147,17 +147,32 @@ extern "C" void sonos_lms_transport(char command)
         acknowledge_squeezebox_resume(streamId.load());
         if (playOnly) {
             auto dispatched = std::chrono::steady_clock::now();
+            unsigned requestedStream = streamId.load();
             // The Play reply may wait for audio: let process_strm release PCM now.
-            std::thread([dispatched] {
-                std::unique_lock<std::mutex> lock(transportMutex, std::try_to_lock);
-                if (lock.owns_lock() && !stream_just_restarted() && gPlayer) {
-                    bool ok = gPlayer->Play();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - dispatched).count();
-                    printf("device resume: strategy=playonly Play() %s after %lldms\n",
-                        ok ? "sent" : "failed", (long long)elapsed);
-                } else {
-                    printf("device resume: strategy=playonly Play() skipped: transport unavailable\n");
+            std::thread([dispatched, requestedStream] {
+                const auto deadline = dispatched + std::chrono::seconds(3);
+                for (;;) {
+                    if (streamId.load() != requestedStream) {
+                        printf("device resume: strategy=playonly Play() skipped: stream changed\n");
+                        return;
+                    }
+                    if (std::chrono::steady_clock::now() >= deadline) {
+                        printf("device resume: strategy=playonly Play() skipped: 3 s expired\n");
+                        return;
+                    }
+                    {
+                        std::unique_lock<std::mutex> lock(transportMutex, std::try_to_lock);
+                        if (lock.owns_lock() && streamId.load() == requestedStream
+                            && !stream_just_restarted() && gPlayer) {
+                            bool ok = gPlayer->Play();
+                            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - dispatched).count();
+                            printf("device resume: strategy=playonly Play() %s after %lldms\n",
+                                ok ? "sent" : "failed", (long long)elapsed);
+                            return;
+                        }
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
             }).detach();
         }
