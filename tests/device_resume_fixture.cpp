@@ -158,11 +158,20 @@ static void paused(const char* status) {
 }
 
 int main() {
-    sonos_lms_transport('t');
-    assert(decisionLogs == 0);
-    sonos_lms_transport('a');
-    assert(decisionLogs == 1);
-    puts("PASS: heartbeat skips the decision log; other commands retain it");
+    // Isolate logging from device I/O, and check heartbeats between every
+    // supported transport command rather than only at startup.
+    ourStreamStarted = false;
+    for (char command : std::string("afpqsu")) {
+        unsigned before = decisionLogs;
+        sonos_lms_transport('t');
+        assert(decisionLogs == before);
+        sonos_lms_transport(command);
+        assert(decisionLogs == before + 1);
+    }
+    resumeState = ResumeState{};
+    lmsPaused = false;
+    ourStreamStarted = true;
+    puts("PASS: heartbeat skips the decision log; a/f/p/q/s/u each retain it");
     if (deviceResumeStrategy() == DeviceResume::PlayOnly) {
         for (bool held : {true, false}) {
             paused("OK");

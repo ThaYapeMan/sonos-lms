@@ -109,15 +109,17 @@ extern "C" void sonos_lms_transport(char command)
         responseOpen = command == 'u' && squeezebox_response_open(streamId.load());
         unpause = resumeState.command(command, responseOpen);
     }
-    const char* decision = "None";
-    switch (unpause) {
-    case ResumeState::Unpause::NewStream: decision = "NewStream"; break;
-    case ResumeState::Unpause::FeedHeldGet: decision = "FeedHeldGet"; break;
-    case ResumeState::Unpause::SameURL: decision = "SameURL"; break;
-    case ResumeState::Unpause::None: break;
-    }
-    if (command != 't')
+    // Heartbeats still pass through ResumeState, but need no decision log.
+    if (command != 't') {
+        const char* decision = "None";
+        switch (unpause) {
+        case ResumeState::Unpause::NewStream: decision = "NewStream"; break;
+        case ResumeState::Unpause::FeedHeldGet: decision = "FeedHeldGet"; break;
+        case ResumeState::Unpause::SameURL: decision = "SameURL"; break;
+        case ResumeState::Unpause::None: break;
+        }
         printf("strm %c: decision=%s stream=%u\n", command, decision, streamId.load());
+    }
     if (command == 's') {
         ++lmsStreamSerial; // release a producer waiting on an obsolete HTTP request
         lmsPaused.store(false);
