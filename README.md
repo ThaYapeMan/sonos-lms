@@ -235,7 +235,7 @@ This decoder-continuation hypothesis is superseded by the MP3 reference finding
 below. The mode remains available for comparison.
 
 `feed-restart` keeps and feeds Sonos's own device-resume GET with normal FLAC
-metadata, without invalidation, a server-induced close, PlayStream, or Play at
+metadata by default, without invalidation, a server-induced close, PlayStream, or Play at
 that point. It logs `device resume: strategy=feed-restart feeding Sonos's own
 GET`. A one-shot, five-second watch then observes transport state. STOPPED
 schedules one same-URL PlayStream restart after 200 ms; the transport lock is
@@ -251,8 +251,28 @@ the client side, and reported STOPPED/OK; the next GET played. The bridge's
 `playonly` trace likewise showed client closure and silence without a reported
 dialog, whereas `sameurl-close` recovered playback but produced a dialog in all
 three rounds. `feed-restart` tests letting Sonos finish that first attempt
-itself before automatically restarting. Physical verification of this new mode
-is still required; raw evidence stays local in `logs/`.
+itself before automatically restarting. The later feed-restart test restored
+playback but still reported ERROR_CORRUPT_FILE and an iOS dialog. Its resume
+response used chunked encoding and fresh FLAC metadata; the reference used raw
+MP3 with connection-close framing. These differences motivate two independent
+experiments, not a confirmed explanation of the dialog. Raw evidence stays
+local in `logs/`.
+
+With `feed-restart`, two switches affect only the held GET selected for device
+resume, before PCM is released:
+
+- `SONOS_SQUEEZEBOX_RESUME_BODY=header|frames` (default `header`): send fresh FLAC
+  metadata, or strip the `fLaC` marker and metadata blocks and start at the first
+  audio frame using the same parser as `playonly-frames`.
+- `SONOS_SQUEEZEBOX_RESUME_TRANSFER=chunked|raw` (default `chunked`): use current
+  chunked framing, or write the body directly with `Connection: close` and
+  neither Transfer-Encoding nor Content-Length.
+
+Both switches are read and logged once at startup; invalid values warn and use
+their defaults. Each selected request logs `resume GET #id body=<value>
+transfer=<value>`. Initial GETs, promoted standbys, the automatic restart GET,
+and other strategies retain their existing response formats. Test frames/raw,
+header/raw, and frames/chunked separately to distinguish the two effects.
 
 Unknown values warn and use `sameurl-503`. The uncancelled five-second no-audio
 timeout returns 503 in every mode. Each application logs `device resume:

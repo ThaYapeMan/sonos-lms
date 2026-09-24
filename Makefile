@@ -61,6 +61,8 @@ test: encoder-test resume-state-test streamer-test flac-metadata-test feed-resta
 	SONOS_SQUEEZEBOX_DEVICE_RESUME=feed-restart ./streamer-test feed-restart
 	python3 tests/device_resume_test.py
 	python3 tests/lms_discovery_test.py
+	python3 tests/resume_response_test.py
+	@for body in header frames; do for transfer in chunked raw; do SONOS_SQUEEZEBOX_DEVICE_RESUME=feed-restart SONOS_SQUEEZEBOX_RESUME_BODY=$$body SONOS_SQUEEZEBOX_RESUME_TRANSFER=$$transfer ./streamer-test feed-restart || exit $$?; done; done
 
 sbstreamer.o sbencoder.o: sbencoder.h
 
@@ -80,3 +82,5 @@ flac-metadata-test: tests/flac_metadata_test.cpp flac_metadata.h sbencoder.cpp s
 sonos-squeezebox.o: feed_restart.h
 feed-restart-test: tests/feed_restart_test.cpp feed_restart.h
 	g++ -g -O2 -Wall -I. -o $@ tests/feed_restart_test.cpp -lpthread
+
+sonos-squeezebox.o sbstreamer.o streamer-test: resume_response.h

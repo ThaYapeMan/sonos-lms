@@ -38,7 +38,8 @@ static unsigned pauseCalls = 0, responseEnds = 0;
 static unsigned cliPlays = 0;
 static std::atomic<unsigned> streamPlays{0};
 static std::atomic<unsigned> transportPlays{0};
-static unsigned heldGetInvalidations = 0, framesResumeMarks = 0;
+static unsigned heldGetInvalidations = 0, framesResumeMarks = 0, feedResumeMarks = 0;
+static void prepare_squeezebox_feed_restart_resume(unsigned id) { assert(id == 6); ++feedResumeMarks; }
 static void prepare_squeezebox_frames_resume(unsigned id) { assert(id == 6); ++framesResumeMarks; }
 static std::vector<std::string> callOrder;
 struct Transport { std::string TransportState, TransportStatus; };
@@ -152,7 +153,7 @@ static void paused(const char* status) {
     resumeState = ResumeState{};
     deferredStop = StopDebounce{};
     cliPlays = streamPlays = transportPlays = heldGetInvalidations = 0;
-    pauseCalls = responseEnds = framesResumeMarks = 0;
+    pauseCalls = responseEnds = framesResumeMarks = feedResumeMarks = 0;
     callOrder.clear();
     responseOpen = true;
     responseEnded = false;

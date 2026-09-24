@@ -10,6 +10,7 @@ static void feedRestartCases() {
         assert(cliPlays == 1 && streamPlays == 0 && transportPlays == 0);
         assert(heldGetInvalidations == 0 && framesResumeMarks == 0);
         assert(feedRestartWatch.active());
+        assert(feedResumeMarks == 1);
     };
     auto stopped = [] {
         // Reference order: GET -> first audio -> HEAD -> client closes ->

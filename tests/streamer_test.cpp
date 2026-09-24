@@ -2,6 +2,7 @@
 #include "resume_state.h"
 #include "device_resume.h"
 #include "flac_metadata.h"
+#include "resume_response.h"
 #include "private/socket.h"
 #include "private/wsrequestbroker.h"
 #include <FLAC++/decoder.h>
@@ -38,6 +39,7 @@ extern "C" int squeezebox_response_open(unsigned stream);
 extern "C" void acknowledge_squeezebox_resume(unsigned stream);
 extern "C" void invalidate_squeezebox_held_get(unsigned stream);
 extern "C" void prepare_squeezebox_frames_resume(unsigned stream);
+extern "C" void prepare_squeezebox_feed_restart_resume(unsigned stream);
 std::string SqueezeBoxURL(unsigned id) { return "http://bridge/music/squeezebox.flac?stream=" + std::to_string(id); }
 void ResumeSqueezeBox(unsigned id) {
     std::lock_guard<std::mutex> lock(stateMutex);
@@ -52,7 +54,9 @@ void ResumeSqueezeBox(unsigned id) {
         assert(state.command('u', squeezebox_response_open(id)) == ResumeState::Unpause::SameURL);
         if (deviceResumeStrategy() == DeviceResume::PlayOnlyFrames)
             prepare_squeezebox_frames_resume(id);
-        else if (deviceResumeStrategy() != DeviceResume::FeedRestart)
+        else if (deviceResumeStrategy() == DeviceResume::FeedRestart)
+            prepare_squeezebox_feed_restart_resume(id);
+        else
             invalidate_squeezebox_held_get(id);
         acknowledge_squeezebox_resume(id);
         pendingResume = false;
@@ -83,12 +87,13 @@ public:
         }
         if (!headersSent.exchange(true)) {
             headers.assign(data, n);
+            raw = headers.find("Transfer-Encoding: chunked") == std::string::npos;
             if (probe) { drop = true; return false; }
             return true;
         }
         // sendChunk calls size, payload, CRLF separately. Close after the first
         // complete audio packet, keeping the captured FLAC frames decodable.
-        if (phase == 1) {
+        if (raw || phase == 1) {
             body.insert(body.end(), data, data + n);
             if (n > 2 && (unsigned char)data[0] == 0xff && ((unsigned char)data[1] & 0xfe) == 0xf8)
             {
@@ -96,7 +101,7 @@ public:
                 ++audioPackets;
             }
         }
-        phase = (phase + 1) % 3;
+        phase = raw ? 0 : (phase + 1) % 3;
         if (phase == 0 && audioSeen && !stayOpen) { drop = true; return false; }
         return true;
     }
@@ -111,7 +116,7 @@ private:
     std::string input;
     size_t offset = 0;
     int phase = 0;
-    bool probe, stayOpen, drop = false;
+    bool probe, stayOpen, drop = false, raw = false;
 };
 
 class Decoder : public FLAC::Decoder::Stream {
@@ -329,6 +334,11 @@ static void framesResumeTest() {
 
 static void feedRestartStreamTest() {
     SBStreamer broker;
+    const auto settings = resumeResponseSettings();
+    Socket initial(1);
+    connection(broker, initial, 1600);
+    playable(initial, 1600);
+    assert(initial.headers.find("Transfer-Encoding: chunked") != std::string::npos);
     state.command('s'); state.observe("PLAYING");
     state.command('p'); state.observe("PAUSED_PLAYBACK");
     paused = true; deviceState = "PAUSED_PLAYBACK";
@@ -351,10 +361,33 @@ static void feedRestartStreamTest() {
     serve(broker, head);
     assert(head.wire.find("200 OK") != std::string::npos);
     assert(!resume.eof && !resume.disconnected && squeezebox_response_open(1));
+    Socket standby(1, false, true);
+    auto extra = std::async(std::launch::async, [&] { serve(broker, standby); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    assert(!standby.headersSent);
     resume.clientClosed = true;
     ready(get);
-    playable(resume, 1700);
+    if (settings.frames) {
+        assert(resume.body.size() > 2);
+        assert((unsigned char)resume.body[0] == 0xff);
+        assert(((unsigned char)resume.body[1] & 0xfe) == 0xf8);
+    } else playable(resume, 1700);
+    assert((resume.headers.find("Transfer-Encoding: chunked") == std::string::npos) == settings.raw);
+    assert(resume.headers.find("Content-Length:") == std::string::npos);
+    assert(resume.headers.find("Connection: close\r\n") != std::string::npos);
+    if (settings.raw) {
+        // Exact wire equality excludes size prefixes, CRLF separators and EOF chunks.
+        assert(resume.wire == resume.headers + std::string(resume.body.begin(), resume.body.end()));
+    }
     assert(resume.wire.find("503") == std::string::npos && !resume.eof);
+    waitUntil([&] { return standby.headersSent.load(); });
+    feed(1750);
+    waitUntil([&] { return standby.audioSeen.load(); });
+    standby.clientClosed = true;
+    ready(extra);
+    playable(standby, 1750);
+    assert(standby.headers.find("Transfer-Encoding: chunked") != std::string::npos);
+
     {
         std::lock_guard<std::mutex> lock(stateMutex);
         deviceState = "STOPPED";
@@ -365,6 +398,23 @@ static void feedRestartStreamTest() {
     Socket restarted(1);
     connection(broker, restarted, 1800);
     playable(restarted, 1800);
+    assert(restarted.headers.find("Transfer-Encoding: chunked") != std::string::npos);
+    // A later selected resume ended by pause must not append a chunk terminator
+    // in raw mode. This catches errors that a client-closed socket would hide.
+    paused = true;
+    { std::lock_guard<std::mutex> lock(stateMutex); deviceState = "PAUSED_PLAYBACK"; }
+    Socket pauseEnded(1, false, true);
+    auto pauseGet = std::async(std::launch::async, [&] { serve(broker, pauseEnded); });
+    waitUntil([] { return squeezebox_response_open(1); });
+    prepare_squeezebox_feed_restart_resume(1);
+    paused = false; // PCM is released after the device-resume callback
+    feed(1850);
+    waitUntil([&] { return pauseEnded.audioSeen.load(); });
+    end_squeezebox_response();
+    ready(pauseGet);
+    assert(pauseEnded.eof == !settings.raw);
+    if (settings.raw)
+        assert(pauseEnded.wire == pauseEnded.headers + std::string(pauseEnded.body.begin(), pauseEnded.body.end()));
     assert(generation == 1);
     puts("PASS: feed-restart GET receives FLAC/data, HEAD leaves it open, client closes, STOPPED precedes fresh playable same-ID GET");
 }

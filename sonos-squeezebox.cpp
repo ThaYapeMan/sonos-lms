@@ -19,6 +19,7 @@
 
 #include "resume_state.h"
 #include "device_resume.h"
+#include "resume_response.h"
 #include "feed_restart.h"
 #include "sbstreamer.h"
 #include "sonos-position.h"
@@ -82,6 +83,7 @@ extern "C" int squeezebox_response_open(unsigned stream);
 extern "C" void acknowledge_squeezebox_resume(unsigned stream);
 extern "C" void invalidate_squeezebox_held_get(unsigned stream);
 extern "C" void prepare_squeezebox_frames_resume(unsigned stream);
+extern "C" void prepare_squeezebox_feed_restart_resume(unsigned stream);
 static std::mutex stopMutex;
 static StopDebounce deferredStop;
 static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition);
@@ -214,6 +216,7 @@ extern "C" void sonos_lms_transport(char command)
         && deviceResumeStrategy() == DeviceResume::FeedRestart
         && squeezebox_response_open(streamId.load());
     if (feedRestart) {
+        prepare_squeezebox_feed_restart_resume(streamId.load());
         {
             std::lock_guard<std::mutex> lock(feedRestartMutex);
             feedRestartWatch.arm(streamId.load(), FeedRestartWatch::Clock::now());
@@ -862,6 +865,7 @@ int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     (void)deviceResumeStrategy();
+    (void)resumeResponseSettings();
 
     int debugLevel = findFlag(argc, argv, "--debug") ? 4 : 0;
     const char* ip = findOption(argc, argv, "--ip");
