@@ -371,7 +371,17 @@ scenario_5() {
     play_track "$TRACK_B_ID"; wait_s 15; snapshot
     check_song "S5"
     observe "S5: do you hear $TRACK_B_NAME? (y = yes, n = nothing, a = $TRACK_A_NAME came back, other)"
-    prompt "S5 if nothing plays: press PLAY in the Sonos app (otherwise just press Enter)"
+    local playing
+    say ""
+    read -r -p "??? S5: is the speaker playing right now? (y/n) " playing || true
+    printf '[%s] OBSERVED: S5 playing before any Sonos-app action -> %s\n' "$(now)" "${playing:-<no answer>}" \
+        | tee -a "$OUT/steps.log" >&2
+    have logger && logger -t sonos-test "OBSERVED: S5 playing before any Sonos-app action -> ${playing:-<no answer>}"
+    if [[ ${playing,,} != y* ]]; then
+        prompt "S5 press PLAY in the Sonos app"
+    else
+        mark "S5 already playing: no Sonos-app action needed"
+    fi
     wait_s 10; snapshot
     mark "S5 after PLAY: $(now_playing)"
     observe "S5 after PLAY: which song plays? (a = $TRACK_A_NAME, b = $TRACK_B_NAME, none, error dialog)"
