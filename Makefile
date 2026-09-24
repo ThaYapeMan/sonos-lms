@@ -44,7 +44,9 @@ clean:
 
 slimproto_sonos.o: slimproto_sonos.c squeezelite/slimproto.c squeezelite/squeezelite.h
 
-.PHONY: test
+.PHONY: test install
+install:
+	scripts/install-devices.sh
 encoder-test: tests/encoder_test.cpp sbencoder.cpp sbencoder.h noson/noson/libnoson.a
 	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -o $@ tests/encoder_test.cpp sbencoder.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
 
@@ -53,6 +55,7 @@ test: encoder-test resume-state-test streamer-test
 	./resume-state-test
 	./streamer-test
 	python3 tests/device_resume_test.py
+	python3 tests/lms_discovery_test.py
 
 sbstreamer.o sbencoder.o: sbencoder.h
 

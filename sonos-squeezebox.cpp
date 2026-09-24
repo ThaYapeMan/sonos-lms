@@ -29,10 +29,12 @@ unsigned get_squeezebox_stream_id(void);
 
 #include <algorithm>
 #include <atomic>
+#include <arpa/inet.h>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <mutex>
 #include <netdb.h>
 #include <sstream>
@@ -627,6 +629,80 @@ void runBridgeLoop(SONOS::Status& status)
 
 }  // namespace
 
+// Slim discovery replies echo 'E', followed by four-byte tag / byte length / value.
+static bool parseDiscoveryResponse(const char* data, size_t len, std::string& outName)
+{
+    outName.clear();
+    if (!data || len < 1 || data[0] != 'E') return false;
+    std::string name;
+    size_t pos = 1;
+    while (pos < len) {
+        if (len - pos < 5) return false;
+        size_t length = static_cast<unsigned char>(data[pos + 4]);
+        if (length > len - pos - 5) return false;
+        if (memcmp(data + pos, "NAME", 4) == 0)
+            name.assign(data + pos + 5, length);
+        pos += 5 + length;
+    }
+    outName = name;
+    return true;
+}
+
+static std::string discoverLmsServer(unsigned timeoutMs = 3000)
+{
+    if (!timeoutMs) return ""; // a zero SO_RCVTIMEO would wait indefinitely
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return "";
+    int broadcast = 1;
+    timeval tv{static_cast<time_t>(timeoutMs / 1000),
+        static_cast<suseconds_t>((timeoutMs % 1000) * 1000)};
+    if (setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast)) < 0
+        || setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        close(fd);
+        return "";
+    }
+    sockaddr_in destination{};
+    destination.sin_family = AF_INET;
+    destination.sin_port = htons(3483);
+    destination.sin_addr.s_addr = INADDR_BROADCAST;
+    const char request[] = "eNAME\0JSON\0UUID\0VERS\0";
+    if (sendto(fd, request, sizeof(request) - 1, 0,
+            reinterpret_cast<sockaddr*>(&destination), sizeof(destination))
+            != static_cast<ssize_t>(sizeof(request) - 1)) {
+        close(fd);
+        return "";
+    }
+    char data[65536];
+    sockaddr_in sender{};
+    socklen_t senderSize = sizeof(sender);
+    ssize_t size = recvfrom(fd, data, sizeof(data), 0,
+        reinterpret_cast<sockaddr*>(&sender), &senderSize);
+    close(fd);
+    std::string name;
+    if (size < 0 || sender.sin_family != AF_INET
+        || !parseDiscoveryResponse(data, static_cast<size_t>(size), name)) return "";
+    std::string host = inet_ntoa(sender.sin_addr);
+    printf("LMS server from UDP discovery: %s%s%s\n", host.c_str(),
+        name.empty() ? "" : " name=", name.c_str());
+    return host;
+}
+
+static std::string readLmsServerFromConfig(const char* path = "/etc/sonos-squeezebox/config")
+{
+    std::ifstream config(path);
+    std::string line;
+    const char* whitespace = " \t\r\n\f\v";
+    while (std::getline(config, line)) {
+        size_t start = line.find_first_not_of(whitespace);
+        if (start == std::string::npos || line[start] == '#') continue;
+        if (line.compare(start, 11, "LMS_SERVER=") != 0) continue;
+        start = line.find_first_not_of(whitespace, start + 11);
+        if (start == std::string::npos) return "";
+        return line.substr(start, line.find_last_not_of(whitespace) - start + 1);
+    }
+    return "";
+}
+
 int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);
@@ -668,7 +744,22 @@ int main(int argc, char** argv)
     SONOS::Status status(gPlayer);
     status.get_mac(gMac);
     printf(" (MAC = %02X:%02X:%02X:%02X:%02X:%02X)\n\n", gMac[0], gMac[1], gMac[2], gMac[3], gMac[4], gMac[5]);
-    gServer = server ? server : "";
+    if (server) {
+        gServer = server;
+        printf("LMS server from --server: %s\n", gServer.c_str());
+    } else {
+        gServer = readLmsServerFromConfig();
+        if (!gServer.empty())
+            printf("LMS server from /etc/sonos-squeezebox/config: %s\n", gServer.c_str());
+        else
+            gServer = discoverLmsServer();
+    }
+    if (gServer.empty()) {
+        printf("No LMS server resolved from --server, config, or UDP discovery. "
+            "Track metadata and Sonos-app pause/play relay are unavailable without a resolved server. "
+            "Squeezelite's independent discovery will keep retrying for core playback; "
+            "restart with a reachable server to enable metadata and relay.\n");
+    }
 
     static StopTimer stopTimer;
 
@@ -676,7 +767,7 @@ int main(int argc, char** argv)
     if (filename) {
         playLocalFileOnce(filename);
     } else {
-        squeezeliteThread = new std::thread(runSqueezeliteClient, server, std::string(room) + " (Sonos)");
+        squeezeliteThread = new std::thread(runSqueezeliteClient, gServer.empty() ? nullptr : gServer.c_str(), std::string(room) + " (Sonos)");
     }
 
     runBridgeLoop(status);

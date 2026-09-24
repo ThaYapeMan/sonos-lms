@@ -1,0 +1,13 @@
+[Unit]
+Description=SONOS::Squeezebox player for room %I
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/sonos-squeezebox/sonos-squeezebox --room=%I
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
