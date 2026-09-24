@@ -108,6 +108,14 @@ extern "C" void sonos_lms_transport(char command)
         responseOpen = command == 'u' && squeezebox_response_open(streamId.load());
         unpause = resumeState.command(command, responseOpen);
     }
+    const char* decision = "None";
+    switch (unpause) {
+    case ResumeState::Unpause::NewStream: decision = "NewStream"; break;
+    case ResumeState::Unpause::FeedHeldGet: decision = "FeedHeldGet"; break;
+    case ResumeState::Unpause::SameURL: decision = "SameURL"; break;
+    case ResumeState::Unpause::None: break;
+    }
+    printf("strm %c: decision=%s stream=%u\n", command, decision, streamId.load());
     if (command == 's') {
         ++lmsStreamSerial; // release a producer waiting on an obsolete HTTP request
         lmsPaused.store(false);
@@ -319,6 +327,7 @@ static TrackInfo fetchLmsTrackInfo(const std::string& server, const uint8_t* mac
     printf("LMS response: %s\n", response.c_str());
 
     // Each space-separated token is URL-encoded "key:value"
+    std::string playlistTimestamp, playlistIndex, time, duration, mode;
     std::istringstream ss(response);
     std::string token;
     while (ss >> token) {
@@ -331,7 +340,16 @@ static TrackInfo fetchLmsTrackInfo(const std::string& server, const uint8_t* mac
         else if (key == "artist") info.artist = val;
         else if (key == "album")  info.album = val;
         else if (key == "id")     info.id = val;
+        else if (key == "playlist_timestamp") playlistTimestamp = val;
+        else if (key == "playlist_cur_index") playlistIndex = val;
+        else if (key == "time") time = val;
+        else if (key == "duration") duration = val;
+        else if (key == "mode") mode = val;
     }
+
+    printf("LMS identity: id=%s playlist_timestamp=%s index=%s time=%s duration=%s mode=%s\n",
+        info.id.c_str(), playlistTimestamp.c_str(), playlistIndex.c_str(),
+        time.c_str(), duration.c_str(), mode.c_str());
 
     // Build cover art URL from track id (works for local library and most streams)
     if (!info.id.empty())
