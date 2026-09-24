@@ -1,5 +1,6 @@
 #include "resume_state.h"
 #include "device_resume.h"
+#include "feed_restart.h"
 #include "stop_debounce.h"
 #include <atomic>
 #include <cassert>
@@ -28,11 +29,14 @@ static std::atomic<unsigned> streamId{6}, lmsStreamSerial{0}, completedStream{6}
 static std::mutex resumeMutex, stopMutex, transportMutex;
 static ResumeState resumeState;
 static StopDebounce deferredStop;
+static std::mutex feedRestartMutex;
+static FeedRestartWatch feedRestartWatch;
 static bool stream_just_restarted() { return streamId.load() != completedStream.load(); }
 static bool responseOpen = false, responseEnded = false;
 static bool pauseResult = true;
 static unsigned pauseCalls = 0, responseEnds = 0;
-static unsigned cliPlays = 0, streamPlays = 0;
+static unsigned cliPlays = 0;
+static std::atomic<unsigned> streamPlays{0};
 static std::atomic<unsigned> transportPlays{0};
 static unsigned heldGetInvalidations = 0, framesResumeMarks = 0;
 static void prepare_squeezebox_frames_resume(unsigned id) { assert(id == 6); ++framesResumeMarks; }
@@ -45,8 +49,13 @@ struct FakePlayer {
     bool PlayStream(const std::string& url, const std::string&, const std::string&) {
         assert(url == "http://bridge/music/squeezebox.flac?stream=6");
         callOrder.push_back("PlayStream");
-        assert(heldGetInvalidations == streamPlays + 1);
-        assert(callOrder.size() == 2 && callOrder[0] == "invalidate" && callOrder[1] == "PlayStream");
+        if (deviceResumeStrategy() == DeviceResume::FeedRestart && heldGetInvalidations == 0) {
+            assert(!responseOpen); // Sonos closed the GET before STOPPED, as captured
+            assert(callOrder == std::vector<std::string>({"PlayStream"}));
+        } else {
+            assert(heldGetInvalidations == streamPlays + 1);
+            assert(callOrder.size() == 2 && callOrder[0] == "invalidate" && callOrder[1] == "PlayStream");
+        }
         ++streamPlays;
         return true;
     }
@@ -159,7 +168,10 @@ static void paused(const char* status) {
     assert(heldGetInvalidations == 0 && callOrder.empty());
 }
 
+#include "feed_restart_cases.h"
+
 int main() {
+    if (deviceResumeStrategy() == DeviceResume::FeedRestart) { feedRestartCases(); return 0; }
     // Isolate logging from device I/O, and check heartbeats between every
     // supported transport command rather than only at startup.
     ourStreamStarted = false;

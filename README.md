@@ -231,7 +231,28 @@ standbys) retain fresh FLAC headers. It logs `stream N: playonly-frames: skipped
 <n> metadata bytes`. This tests whether Sonos resumes its existing decoder:
 on 2026-09-24 at 17:14, all four tested `playonly` resumes rejected fresh FLAC
 metadata with a HEAD request, GET closure, and `ERROR_CORRUPT_FILE` / `STOPPED`.
-The hypothesis is unconfirmed; this mode needs physical verification.
+This decoder-continuation hypothesis is superseded by the MP3 reference finding
+below. The mode remains available for comparison.
+
+`feed-restart` keeps and feeds Sonos's own device-resume GET with normal FLAC
+metadata, without invalidation, a server-induced close, PlayStream, or Play at
+that point. It logs `device resume: strategy=feed-restart feeding Sonos's own
+GET`. A one-shot, five-second watch then observes transport state. STOPPED
+schedules one same-URL PlayStream restart after 200 ms; the transport lock is
+retried every 10 ms for up to three seconds, bounded also by the watch deadline.
+Two continuous seconds of PLAYING disarm it without restarting. Stream changes,
+LMS `p/q/s`, a new device pause, and deadline expiry cancel it with a reason.
+Without an open held GET, the existing SameURL path is used.
+
+The reference radio test on 2026-09-24 used MP3 through a transparent relay with
+the bridge stopped and the same `x-rincon-mp3radio` UPnP setup. In three rounds,
+Sonos's first resume GET received data, issued HEAD 11–13 ms later, closed from
+the client side, and reported STOPPED/OK; the next GET played. The bridge's
+`playonly` trace likewise showed client closure and silence without a reported
+dialog, whereas `sameurl-close` recovered playback but produced a dialog in all
+three rounds. `feed-restart` tests letting Sonos finish that first attempt
+itself before automatically restarting. Physical verification of this new mode
+is still required; raw evidence stays local in `logs/`.
 
 Unknown values warn and use `sameurl-503`. The uncancelled five-second no-audio
 timeout returns 503 in every mode. Each application logs `device resume:

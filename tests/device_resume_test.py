@@ -22,6 +22,10 @@ def production_function(signature):
 # supplies only external state, network calls, and status/HTTP observations.
 bodies = "\n\n".join(production_function(signature) for signature in (
     "static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition)\n",
+    "static void logFeedRestartCancellation(",
+    "static void cancelFeedRestart(",
+    "static void observeFeedRestart(",
+    "static void dispatchFeedRestart(",
     'extern "C" void sonos_lms_transport(',
     "static void ObserveDeviceTransport(",
     "void ResumeSqueezeBox(",
@@ -36,6 +40,6 @@ with tempfile.TemporaryDirectory(prefix="sonos-device-resume-") as directory:
         "-I", str(directory), str(ROOT / "tests/device_resume_fixture.cpp"),
         "-o", str(executable), "-lpthread",
     ], check=True)
-    for mode in ("sameurl-503", "sameurl-close", "sameurl-empty200", "playonly", "playonly-frames", "unknown"):
+    for mode in ("sameurl-503", "sameurl-close", "sameurl-empty200", "playonly", "playonly-frames", "feed-restart", "unknown"):
         subprocess.run([str(executable)], check=True,
                        env={**os.environ, "SONOS_SQUEEZEBOX_DEVICE_RESUME": mode})

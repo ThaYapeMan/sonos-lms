@@ -52,14 +52,15 @@ void ResumeSqueezeBox(unsigned id) {
         assert(state.command('u', squeezebox_response_open(id)) == ResumeState::Unpause::SameURL);
         if (deviceResumeStrategy() == DeviceResume::PlayOnlyFrames)
             prepare_squeezebox_frames_resume(id);
-        else
+        else if (deviceResumeStrategy() != DeviceResume::FeedRestart)
             invalidate_squeezebox_held_get(id);
         acknowledge_squeezebox_resume(id);
         pendingResume = false;
         paused = false;
         // Model PlayStream(same URL): the test's device opens a fresh GET.
         // The cancelled held request closes before the device reconnects.
-        if (deviceResumeStrategy() != DeviceResume::PlayOnlyFrames) ++sameURLRequests;
+        if (deviceResumeStrategy() != DeviceResume::PlayOnlyFrames
+            && deviceResumeStrategy() != DeviceResume::FeedRestart) ++sameURLRequests;
     }
 }
 
@@ -67,8 +68,8 @@ void ResumeSqueezeBox(unsigned id) {
 // network access: only the socket I/O and LMS/device event source are simulated.
 class Socket : public TcpSocket {
 public:
-    explicit Socket(unsigned id, bool probe = false, bool stayOpen = false) : probe(probe), stayOpen(stayOpen) {
-        input = "GET /music/squeezebox.flac?stream=" + std::to_string(id) + " HTTP/1.1\r\nHost: bridge\r\n\r\n";
+    explicit Socket(unsigned id, bool probe = false, bool stayOpen = false, const char* method = "GET") : probe(probe), stayOpen(stayOpen) {
+        input = std::string(method) + " /music/squeezebox.flac?stream=" + std::to_string(id) + " HTTP/1.1\r\nHost: bridge\r\n\r\n";
     }
     size_t ReceiveData(void* buf, size_t n) override {
         n = std::min(n, input.size() - offset);
@@ -326,7 +327,50 @@ static void framesResumeTest() {
     puts("PASS: later normal GET retains FLAC metadata in playonly-frames mode");
 }
 
+static void feedRestartStreamTest() {
+    SBStreamer broker;
+    state.command('s'); state.observe("PLAYING");
+    state.command('p'); state.observe("PAUSED_PLAYBACK");
+    paused = true; deviceState = "PAUSED_PLAYBACK";
+    Socket resume(1, false, true);
+    auto get = std::async(std::launch::async, [&] { serve(broker, resume); });
+    waitUntil([] { return squeezebox_response_open(1); });
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        deviceState = "TRANSITIONING";
+    }
+    waitUntil([] { return !paused.load(); });
+    assert(resumeCommands == 1 && sameURLRequests == 0);
+    feed(1700);
+    waitUntil([&] { return resume.audioSeen.load(); });
+    assert(!resume.eof && !resume.disconnected);
+    // Mirror the captured radio sequence, not a server-induced cancellation:
+    // data first, HEAD about 11ms later, then Sonos closes the original GET.
+    std::this_thread::sleep_for(std::chrono::milliseconds(11));
+    Socket head(1, false, false, "HEAD");
+    serve(broker, head);
+    assert(head.wire.find("200 OK") != std::string::npos);
+    assert(!resume.eof && !resume.disconnected && squeezebox_response_open(1));
+    resume.clientClosed = true;
+    ready(get);
+    playable(resume, 1700);
+    assert(resume.wire.find("503") == std::string::npos && !resume.eof);
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        deviceState = "STOPPED";
+    }
+    // The transport fixture checks the real delayed PlayStream call. Model
+    // the resulting second GET here to verify its fresh header and audio.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    Socket restarted(1);
+    connection(broker, restarted, 1800);
+    playable(restarted, 1800);
+    assert(generation == 1);
+    puts("PASS: feed-restart GET receives FLAC/data, HEAD leaves it open, client closes, STOPPED precedes fresh playable same-ID GET");
+}
+
 int main(int argc, char**) {
+    if (deviceResumeStrategy() == DeviceResume::FeedRestart) { feedRestartStreamTest(); return 0; }
     if (deviceResumeStrategy() == DeviceResume::PlayOnlyFrames) { framesResumeTest(); return 0; }
     if (argc > 1) { modeTest(); return 0; }
 
