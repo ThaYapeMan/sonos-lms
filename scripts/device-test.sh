@@ -108,6 +108,7 @@ resolve_track() {
     r=$(cli_raw "titles 0 5 search:$(urlenc "$spec") tags:a") || return 1
     id=$(field "$r" id) || return 1
     say "  '$spec' -> id $id: $(field "$r" title) / $(field "$r" artist)"
+    printf '%s' "$(field "$r" artist) - $(field "$r" title)" > "$OUT/.name_$id"
     printf '%s' "$id"
 }
 
@@ -165,6 +166,47 @@ sonos_state() {
         | awk -F'|' 'NF >= 6 && $2 !~ /Title/ { st = $3 } END { gsub(/ /, "", st); print st }'
 }
 
+# Which song the speaker is playing, from the bridge journal:
+#   "Creating new stream (N)" + "PlaySqueezeBox: title='...'" map stream N to a song;
+#   the status table's "| Title  squeezebox.flac?stream=N |" is what the speaker plays.
+journal_tail() { have journalctl && journalctl -u "$UNIT" -n 600 -o cat --no-pager 2>/dev/null; }
+bridge_stream() { journal_tail | sed -n 's/^Creating new stream (\([0-9]*\)).*/\1/p' | tail -n1; }
+speaker_stream() { journal_tail | sed -n 's/^| Title  *squeezebox\.flac?stream=\([0-9]*\).*/\1/p' | tail -n1; }
+stream_song() {
+    [[ -n $1 ]] || return 0
+    journal_tail | awk -v n="$1" '
+        /^Creating new stream \(/ { cur = $0; sub(/^Creating new stream \(/, "", cur); sub(/\).*/, "", cur) }
+        /^PlaySqueezeBox: title=/ && cur == n { t = $0; sub(/^PlaySqueezeBox: title=\047/, "", t); sub(/\047 art=.*/, "", t); song = t }
+        END { print song }'
+}
+# One line: what LMS, the bridge and the speaker each think is playing.
+now_playing() {
+    local bs ss
+    bs=$(bridge_stream); ss=$(speaker_stream)
+    printf 'LMS: "%s" | bridge newest stream %s: "%s" | speaker on stream %s: "%s"' \
+        "$(field "$(cli_raw "$PLAYER status - 1 tags:a")" title 2>/dev/null)" \
+        "${bs:-?}" "$(stream_song "$bs")" "${ss:-?}" "$(stream_song "$ss")"
+}
+# 0 when the speaker plays the bridge's newest stream AND that stream is the
+# song LMS reports as current. Empty journal data counts as "cannot check".
+speaker_on_current_song() {
+    local bs ss lms_title
+    bs=$(bridge_stream); ss=$(speaker_stream)
+    [[ -z $bs || -z $ss ]] && return 0
+    lms_title=$(field "$(cli_raw "$PLAYER status - 1 tags:a")" title 2>/dev/null)
+    [[ $ss == "$bs" && ( -z $lms_title || $(stream_song "$ss") == "$lms_title" ) ]]
+}
+# Automatic check after a track change: mark OK or MISMATCH with song names.
+check_song() {
+    local label=$1 i
+    for (( i = 0; i < 10; i++ )); do speaker_on_current_song && break; sleep 1; done
+    if speaker_on_current_song; then
+        mark "$label CHECK OK: $(now_playing)"
+    else
+        mark "$label CHECK MISMATCH: $(now_playing)"
+    fi
+}
+
 lms_mode() { local r; r=$(cli_raw "$PLAYER mode ?"); printf '%s' "${r##* }"; }
 lms_time() { field "$(cli_raw "$PLAYER status - 1 tags:a")" time 2>/dev/null || echo 0; }
 
@@ -180,7 +222,10 @@ wait_sonos() {
     return 1
 }
 
-snapshot() { printf '[%s] LMS %s\n' "$(now)" "$(status_line)" | tee -a "$OUT/steps.log" >&2; }
+snapshot() {
+    printf '[%s] LMS %s\n' "$(now)" "$(status_line)" | tee -a "$OUT/steps.log" >&2
+    printf '[%s]   now playing -> %s\n' "$(now)" "$(now_playing)" | tee -a "$OUT/steps.log" >&2
+}
 
 # ------------------------------------------------------------- capturing ---
 
@@ -269,12 +314,14 @@ setup_playing_a() {
     local sonos_ok=$?
     t1=$(lms_time); sleep 2; t2=$(lms_time)
     snapshot
-    if (( sonos_ok != 0 )) || ! awk -v a="$t1" -v b="$t2" 'BEGIN { exit !(b >= a + 1) }'; then
-        mark "SETUP FAILED: speaker=$(sonos_state) lms_mode=$(lms_mode) position ${t1}s -> ${t2}s; scenario skipped"
+    local song_ok=0
+    speaker_on_current_song || song_ok=1
+    if (( sonos_ok != 0 || song_ok != 0 )) || ! awk -v a="$t1" -v b="$t2" 'BEGIN { exit !(b >= a + 1) }'; then
+        mark "SETUP FAILED: speaker=$(sonos_state) lms_mode=$(lms_mode) position ${t1}s -> ${t2}s; $(now_playing); scenario skipped"
         observe "setup failed: what does the speaker do? (playing/stopped/silent/error dialog)"
         return 1
     fi
-    mark "setup OK: speaker PLAYING, LMS position ${t1}s -> ${t2}s"
+    mark "setup OK: speaker PLAYING, LMS position ${t1}s -> ${t2}s; $(now_playing)"
 }
 
 scenario_1() {
@@ -301,7 +348,8 @@ scenario_3() {
     setup_playing_a || return 0
     mark "S3 LMS loads track B"
     play_track "$TRACK_B_ID"; wait_s 15; snapshot
-    observe "S3: is track B playing on the speaker? (y/n/other)"
+    check_song "S3"
+    observe "S3: do you hear $TRACK_B_NAME? (y/n/other)"
 }
 
 scenario_4() {
@@ -311,7 +359,8 @@ scenario_4() {
     lms pause 1; wait_s 8; snapshot
     mark "S4 LMS loads track B while paused"
     play_track "$TRACK_B_ID"; wait_s 15; snapshot
-    observe "S4: is track B playing on the speaker? (y/n/other)"
+    check_song "S4"
+    observe "S4: do you hear $TRACK_B_NAME? (y/n/other)"
 }
 
 scenario_5() {
@@ -320,10 +369,12 @@ scenario_5() {
     prompt "S5 press PAUSE in the Sonos app"; wait_s 8; snapshot
     mark "S5 LMS loads track B while Sonos-paused"
     play_track "$TRACK_B_ID"; wait_s 15; snapshot
-    observe "S5: is track B playing? (y = yes, n = nothing, a = track A came back, other)"
+    check_song "S5"
+    observe "S5: do you hear $TRACK_B_NAME? (y = yes, n = nothing, a = $TRACK_A_NAME came back, other)"
     prompt "S5 if nothing plays: press PLAY in the Sonos app (otherwise just press Enter)"
     wait_s 10; snapshot
-    observe "S5 after PLAY: which track plays? (a/b/none/error dialog)"
+    mark "S5 after PLAY: $(now_playing)"
+    observe "S5 after PLAY: which song plays? (a = $TRACK_A_NAME, b = $TRACK_B_NAME, none, error dialog)"
 }
 
 scenario_6() {
@@ -383,6 +434,9 @@ say "Room $ROOM ($UNIT), LMS $LMS, player $PLAYER"
 say "Tracks:"
 TRACK_A_ID=$(resolve_track "$TRACK_A") || fail "track A not found: $TRACK_A"
 TRACK_B_ID=$(resolve_track "$TRACK_B") || fail "track B not found: $TRACK_B"
+TRACK_A_NAME=$(cat "$OUT/.name_$TRACK_A_ID" 2>/dev/null || echo "track A")
+TRACK_B_NAME=$(cat "$OUT/.name_$TRACK_B_ID" 2>/dev/null || echo "track B")
+rm -f "$OUT"/.name_*
 say "Output: $OUT"
 say ""
 say "Scenarios $SCENARIOS. Keep the Sonos app open on room $ROOM."
