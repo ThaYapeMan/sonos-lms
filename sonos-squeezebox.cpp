@@ -153,14 +153,15 @@ extern "C" void sonos_lms_transport(char command)
             if (missing) invalidate_squeezebox_held_get(streamId.load());
             ok = PlaySqueezeBoxLocked(streamId.load(), false);
         } else {
+            // Sonos withholds its Pause acknowledgement until the stream closes.
+            // End the response first, regardless of whether Pause succeeds.
+            if (pause) end_squeezebox_response();
             auto upnpStart = std::chrono::steady_clock::now();
             ok = pause ? gPlayer->Pause() : gPlayer->Play();
             auto upnpMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - upnpStart).count();
             printf("gPlayer->%s took %lldms\n", pause ? "Pause" : "Play", (long long)upnpMs);
         }
-        // End the response AFTER Pause, even if the device rejected the command.
-        if (pause) end_squeezebox_response();
         if (!ok) printf("strm %c: device transport command failed\n", command);
     }
 }

@@ -14,6 +14,8 @@ static ResumeState resumeState;
 static StopDebounce deferredStop;
 static bool stream_just_restarted() { return false; }
 static bool responseOpen = false, responseEnded = false;
+static bool pauseResult = true;
+static unsigned pauseCalls = 0, responseEnds = 0;
 static unsigned cliPlays = 0, streamPlays = 0, transportPlays = 0;
 static unsigned heldGetInvalidations = 0;
 static std::vector<std::string> callOrder;
@@ -30,14 +32,23 @@ struct FakePlayer {
         ++streamPlays;
         return true;
     }
-    bool Pause() { return true; }
+    bool Pause() {
+        // Inspect state inside the blocking call, before its result is known.
+        assert(!responseOpen && responseEnded && responseEnds == 1);
+        ++pauseCalls;
+        return pauseResult;
+    }
     bool Play() { ++transportPlays; return true; }
 } player;
 static FakePlayer* gPlayer = &player;
 static int gServer = 0, gMac = 0;
 static bool squeezebox_response_open(unsigned id) { assert(id == 6); return responseOpen; }
 static bool squeezebox_response_ended(unsigned id) { assert(id == 6); return responseEnded; }
-static void end_squeezebox_response() { responseOpen = false; responseEnded = true; }
+static void end_squeezebox_response() {
+    ++responseEnds;
+    responseOpen = false;
+    responseEnded = true;
+}
 static void acknowledge_squeezebox_resume(unsigned id) { assert(id == 6); responseEnded = false; }
 static void invalidate_squeezebox_held_get(unsigned id) {
     assert(id == 6);
@@ -83,6 +94,7 @@ static void paused(const char* status) {
     resumeState = ResumeState{};
     deferredStop = StopDebounce{};
     cliPlays = streamPlays = transportPlays = heldGetInvalidations = 0;
+    pauseCalls = responseEnds = 0;
     callOrder.clear();
     responseOpen = true;
     responseEnded = false;
@@ -94,10 +106,18 @@ static void paused(const char* status) {
     SONOS::Status snapshot;
     refreshStatus(snapshot);
     assert(lmsPaused && !responseOpen && responseEnded && cliPlays == 0);
+    assert(pauseCalls == 1 && responseEnds == 1);
     assert(heldGetInvalidations == 0 && callOrder.empty());
 }
 
 int main() {
+    for (bool success : {true, false}) {
+        pauseResult = success;
+        paused("OK");
+        printf("PASS: ordinary pause ends the response before Pause returns %s\n",
+            success ? "success" : "failure");
+    }
+    pauseResult = true;
     SONOS::Status snapshot;
     for (const char* status : {"ERROR_NO_RESOURCE", "ERROR_LOST_CONNECTION", "OK"}) {
         paused(status);
