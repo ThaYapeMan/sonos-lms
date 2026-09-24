@@ -371,20 +371,28 @@ scenario_5() {
     play_track "$TRACK_B_ID"; wait_s 15; snapshot
     check_song "S5"
     observe "S5: do you hear $TRACK_B_NAME? (y = yes, n = nothing, a = $TRACK_A_NAME came back, other)"
-    local playing
-    say ""
-    read -r -p "??? S5: is the speaker playing right now? (y/n) " playing || true
-    printf '[%s] OBSERVED: S5 playing before any Sonos-app action -> %s\n' "$(now)" "${playing:-<no answer>}" \
-        | tee -a "$OUT/steps.log" >&2
-    have logger && logger -t sonos-test "OBSERVED: S5 playing before any Sonos-app action -> ${playing:-<no answer>}"
-    if [[ ${playing,,} != y* ]]; then
-        prompt "S5 press PLAY in the Sonos app"
-    else
-        mark "S5 already playing: no Sonos-app action needed"
+    # S5a: after a Sonos-app pause, loading a new track in LMS must start it by
+    # itself. Decide from the data (speaker PLAYING, on the bridge's newest
+    # stream, which is the song LMS reports); ask the tester only if unsure.
+    local st auto=0
+    st=$(sonos_state)
+    if [[ $st == PLAYING ]] && speaker_on_current_song; then
+        auto=1
+    elif [[ -z $st ]]; then
+        local playing
+        say ""
+        read -r -p "??? S5: is the speaker playing right now? (y/n) " playing || true
+        [[ ${playing,,} == y* ]] && auto=1
     fi
-    wait_s 10; snapshot
-    mark "S5 after PLAY: $(now_playing)"
-    observe "S5 after PLAY: which song plays? (a = $TRACK_A_NAME, b = $TRACK_B_NAME, none, error dialog)"
+    if (( auto )); then
+        mark "S5a AUTO-START PASS: $(now_playing); no Sonos-app action needed"
+    else
+        mark "S5a AUTO-START FAIL: speaker=${st:-unknown}; $(now_playing)"
+        prompt "S5b press PLAY in the Sonos app (recovery test)"
+        wait_s 10; snapshot
+        mark "S5b after PLAY: speaker=$(sonos_state); $(now_playing)"
+        observe "S5b after PLAY: which song plays? (a = $TRACK_A_NAME, b = $TRACK_B_NAME, none, error dialog)"
+    fi
 }
 
 scenario_6() {
