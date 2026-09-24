@@ -79,6 +79,7 @@ extern "C" int squeezebox_response_ended(unsigned stream);
 extern "C" int squeezebox_response_open(unsigned stream);
 extern "C" void acknowledge_squeezebox_resume(unsigned stream);
 extern "C" void invalidate_squeezebox_held_get(unsigned stream);
+extern "C" void prepare_squeezebox_frames_resume(unsigned stream);
 static std::mutex stopMutex;
 static StopDebounce deferredStop;
 static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition);
@@ -137,13 +138,17 @@ extern "C" void sonos_lms_transport(char command)
         return; // decoded track boundary allocates the ID and calls PlaySqueezeBox
     }
     bool playOnly = responseOpen && unpause == ResumeState::Unpause::SameURL
-        && deviceResumeStrategy() == DeviceResume::PlayOnly
+        && isPlayOnly(deviceResumeStrategy())
         && squeezebox_response_open(streamId.load());
     if (unpause == ResumeState::Unpause::SameURL)
         printf("device resume: strategy=%s stream=%u action=%s\n",
             deviceResumeName(deviceResumeStrategy()), streamId.load(),
             playOnly ? "Play and feed held GET" : "SameURL");
-    if (playOnly) unpause = ResumeState::Unpause::FeedHeldGet;
+    if (playOnly) {
+        if (deviceResumeStrategy() == DeviceResume::PlayOnlyFrames)
+            prepare_squeezebox_frames_resume(streamId.load());
+        unpause = ResumeState::Unpause::FeedHeldGet;
+    }
     if (unpause == ResumeState::Unpause::FeedHeldGet) {
         printf("strm u: feeding held GET, no same-URL resume\n");
         acknowledge_squeezebox_resume(streamId.load());
@@ -155,11 +160,13 @@ extern "C" void sonos_lms_transport(char command)
                 const auto deadline = dispatched + std::chrono::seconds(3);
                 for (;;) {
                     if (streamId.load() != requestedStream) {
-                        printf("device resume: strategy=playonly Play() skipped: stream changed\n");
+                        printf("device resume: strategy=%s Play() skipped: stream changed\n",
+                            deviceResumeName(deviceResumeStrategy()));
                         return;
                     }
                     if (std::chrono::steady_clock::now() >= deadline) {
-                        printf("device resume: strategy=playonly Play() skipped: 3 s expired\n");
+                        printf("device resume: strategy=%s Play() skipped: 3 s expired\n",
+                            deviceResumeName(deviceResumeStrategy()));
                         return;
                     }
                     {
@@ -169,8 +176,8 @@ extern "C" void sonos_lms_transport(char command)
                             bool ok = gPlayer->Play();
                             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now() - dispatched).count();
-                            printf("device resume: strategy=playonly Play() %s after %lldms\n",
-                                ok ? "sent" : "failed", (long long)elapsed);
+                            printf("device resume: strategy=%s Play() %s after %lldms\n",
+                                deviceResumeName(deviceResumeStrategy()), ok ? "sent" : "failed", (long long)elapsed);
                             return;
                         }
                     }

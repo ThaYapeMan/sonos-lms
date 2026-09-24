@@ -34,7 +34,8 @@ static bool pauseResult = true;
 static unsigned pauseCalls = 0, responseEnds = 0;
 static unsigned cliPlays = 0, streamPlays = 0;
 static std::atomic<unsigned> transportPlays{0};
-static unsigned heldGetInvalidations = 0;
+static unsigned heldGetInvalidations = 0, framesResumeMarks = 0;
+static void prepare_squeezebox_frames_resume(unsigned id) { assert(id == 6); ++framesResumeMarks; }
 static std::vector<std::string> callOrder;
 struct Transport { std::string TransportState, TransportStatus; };
 struct FakePlayer {
@@ -121,7 +122,8 @@ static int productionPrintf(const char* format, ...) {
     fputs(message, stdout);
     if (std::string(message).find(": decision=") != std::string::npos)
         ++decisionLogs;
-    if (std::string(message).find("device resume: strategy=playonly Play() ") == 0) {
+    if (std::string(message).find("device resume: strategy=") == 0
+        && std::string(message).find(" Play() ") != std::string::npos) {
         playCompletion = message;
         playFinished = true;
     }
@@ -141,7 +143,7 @@ static void paused(const char* status) {
     resumeState = ResumeState{};
     deferredStop = StopDebounce{};
     cliPlays = streamPlays = transportPlays = heldGetInvalidations = 0;
-    pauseCalls = responseEnds = 0;
+    pauseCalls = responseEnds = framesResumeMarks = 0;
     callOrder.clear();
     responseOpen = true;
     responseEnded = false;
@@ -172,7 +174,7 @@ int main() {
     lmsPaused = false;
     ourStreamStarted = true;
     puts("PASS: heartbeat skips the decision log; a/f/p/q/s/u each retain it");
-    if (deviceResumeStrategy() == DeviceResume::PlayOnly) {
+    if (isPlayOnly(deviceResumeStrategy())) {
         for (bool held : {true, false}) {
             paused("OK");
             responseOpen = held;
@@ -193,6 +195,7 @@ int main() {
             assert(streamPlays == (held ? 0u : 1u));
             assert(heldGetInvalidations == (held ? 0u : 1u));
             assert(responseOpen == held);
+            assert(framesResumeMarks == (held && deviceResumeStrategy() == DeviceResume::PlayOnlyFrames ? 1u : 0u));
         }
         for (const std::string outcome : {"released", "changed", "expired"}) {
             paused("OK");
@@ -245,6 +248,11 @@ int main() {
         assert(transportPlays == 1);
         puts("PASS: playonly waits for restart completion, then sends exactly one Play");
         puts("PASS: playonly returns before the Play reply so PCM can flow; sends one Play with held GET; missing GET falls back");
+        paused("OK");
+        responseOpen = true;
+        sonos_lms_transport('u');
+        assert(framesResumeMarks == 0 && transportPlays == 0 && streamPlays == 0);
+        puts("PASS: ordinary LMS held-GET resume never marks metadata for skipping");
         return 0;
     }
 

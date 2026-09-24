@@ -218,8 +218,21 @@ logged once at startup. `sameurl-503` (default) retains the existing same-URL
 resume and cancelled held-GET 503 response. `sameurl-close` disconnects a
 cancelled GET without audio or HTTP bytes; `sameurl-empty200` sends streaming
 200 headers and an empty chunked body. `playonly` keeps an open held GET,
-attempts one UPnP Play using a non-blocking transport lock, and feeds that GET
-when PCM arrives; without an open GET it falls back to the same-URL path.
+feeds it immediately, and dispatches one UPnP Play from a detached thread. That
+thread retries the transport lock every 10 ms for up to three seconds, skipping
+if the stream changes or the deadline expires. Without an open GET it falls
+back to the same-URL path.
+
+`playonly-frames` uses the same resume and Play retry path, but strips the
+`fLaC` marker and all FLAC metadata blocks from only the held GET selected by a
+device-initiated resume. Its HTTP body starts at the first audio frame. Initial
+playback, ordinary LMS unpause, PlayStream, and other GETs (including promoted
+standbys) retain fresh FLAC headers. It logs `stream N: playonly-frames: skipped
+<n> metadata bytes`. This tests whether Sonos resumes its existing decoder:
+on 2026-09-24 at 17:14, all four tested `playonly` resumes rejected fresh FLAC
+metadata with a HEAD request, GET closure, and `ERROR_CORRUPT_FILE` / `STOPPED`.
+The hypothesis is unconfirmed; this mode needs physical verification.
+
 Unknown values warn and use `sameurl-503`. The uncancelled five-second no-audio
 timeout returns 503 in every mode. Each application logs `device resume:
 strategy=<mode>`. Physical Sonos verification is still required.

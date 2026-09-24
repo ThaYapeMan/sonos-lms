@@ -8,3 +8,5 @@ attic
 /resume-state-test
 /streamer-test
 !scripts/*.sh
+
+/flac-metadata-test

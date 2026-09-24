@@ -40,7 +40,7 @@ sonos-squeezebox: $(OBJS) $(OBJS_SL) noson/noson/libnoson.a
 		-lpthread -lm -lrt -ldl -lasound
 
 clean:
-	rm -f *.o squeezelite/*.o sonos-squeezebox encoder-test resume-state-test streamer-test
+	rm -f *.o squeezelite/*.o sonos-squeezebox encoder-test resume-state-test streamer-test flac-metadata-test
 
 slimproto_sonos.o: slimproto_sonos.c squeezelite/slimproto.c squeezelite/squeezelite.h
 
@@ -50,11 +50,13 @@ install:
 encoder-test: tests/encoder_test.cpp sbencoder.cpp sbencoder.h noson/noson/libnoson.a
 	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -o $@ tests/encoder_test.cpp sbencoder.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
 
-test: encoder-test resume-state-test streamer-test
+test: encoder-test resume-state-test streamer-test flac-metadata-test
 	./encoder-test
+	./flac-metadata-test
 	./resume-state-test
 	./streamer-test
 	@for mode in sameurl-503 sameurl-close sameurl-empty200 playonly unknown; do SONOS_SQUEEZEBOX_DEVICE_RESUME=$$mode ./streamer-test mode || exit $$?; done
+	SONOS_SQUEEZEBOX_DEVICE_RESUME=playonly-frames ./streamer-test frames
 	python3 tests/device_resume_test.py
 	python3 tests/lms_discovery_test.py
 
@@ -68,3 +70,7 @@ resume-state-test: tests/resume_state_test.cpp resume_state.h stop_debounce.h
 
 streamer-test: device_resume.h tests/streamer_test.cpp sbstreamer.cpp sbstreamer.h sbencoder.cpp sbencoder.h resume_state.h noson/noson/libnoson.a
 	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -o $@ tests/streamer_test.cpp sbstreamer.cpp sbencoder.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
+
+sbstreamer.o streamer-test: flac_metadata.h
+flac-metadata-test: tests/flac_metadata_test.cpp flac_metadata.h sbencoder.cpp sbencoder.h noson/noson/libnoson.a
+	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -o $@ tests/flac_metadata_test.cpp sbencoder.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread

@@ -36,6 +36,6 @@ with tempfile.TemporaryDirectory(prefix="sonos-device-resume-") as directory:
         "-I", str(directory), str(ROOT / "tests/device_resume_fixture.cpp"),
         "-o", str(executable), "-lpthread",
     ], check=True)
-    for mode in ("sameurl-503", "sameurl-close", "sameurl-empty200", "playonly", "unknown"):
+    for mode in ("sameurl-503", "sameurl-close", "sameurl-empty200", "playonly", "playonly-frames", "unknown"):
         subprocess.run([str(executable)], check=True,
                        env={**os.environ, "SONOS_SQUEEZEBOX_DEVICE_RESUME": mode})

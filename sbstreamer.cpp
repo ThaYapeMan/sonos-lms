@@ -23,6 +23,7 @@
 #include <sys/socket.h>
 #include "sbencoder.h"
 #include "device_resume.h"
+#include "flac_metadata.h"
 
 #include <cstring>
 #include <algorithm>
@@ -57,6 +58,8 @@ struct StreamRequest {
     std::shared_ptr<SBEncoder> encoder;
     bool opened = false;
     bool pauseEnded = false;
+    bool headersStarted = false;
+    bool skipResumeMetadata = false;
 };
 static unsigned long long nextRequestId = 0;
 static unsigned ownershipStream = 0;
@@ -114,6 +117,18 @@ void acknowledge_squeezebox_resume(unsigned stream)
 {
     std::lock_guard<std::mutex> lock(g_enc_mutex);
     if (endedByPause == stream) endedByPause = 0;
+}
+
+// Called only for a device-initiated playonly-frames unpause, before PCM is
+// released. Bind the experiment to this request, never the stream or successor.
+void prepare_squeezebox_frames_resume(unsigned stream)
+{
+    std::lock_guard<std::mutex> lock(g_enc_mutex);
+    if (deviceResumeStrategy() == DeviceResume::PlayOnlyFrames && activeRequest
+        && activeRequest->stream == stream && !activeRequest->headersStarted
+        && !activeRequest->encoder->cancelled() && !activeRequest->encoder->responseEnded()
+        && !activeRequest->encoder->hasAudio())
+        activeRequest->skipResumeMetadata = true;
 }
 
 void invalidate_squeezebox_held_get(unsigned stream)
@@ -358,12 +373,38 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
         usleep(10000);
     }
     char buf[SBSTREAMER_CHUNK];
+    bool skipMetadata;
+    {
+        std::lock_guard<std::mutex> lock(g_enc_mutex);
+        request->headersStarted = true;
+        skipMetadata = request->skipResumeMetadata;
+    }
     int r = 0;
     if (opened && (!waitForResumeAudio || enc->hasAudio()) && !enc->cancelled())
         r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed);
+    bool streamReady = r >= 4 && memcmp(buf, "fLaC", 4) == 0;
+    if (skipMetadata && streamReady) {
+        FlacMetadataSkipper metadata;
+        bool logged = false;
+        while (r > 0 && !IsAborted()) {
+            size_t skipped = metadata.consume(buf, r);
+            if (!metadata.valid()) { r = 0; break; }
+            if (metadata.done() && !logged) {
+                printf("stream %d: playonly-frames: skipped %zu metadata bytes\n", stream, metadata.skipped());
+                logged = true;
+            }
+            r -= skipped;
+            if (r > 0) {
+                memmove(buf, buf + skipped, r);
+                break;
+            }
+            r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed);
+        }
+        streamReady = metadata.valid() && metadata.done() && r > 0 && !IsAborted();
+    }
     const std::string streamingHeaders = "HTTP/1.1 200 OK\r\nServer: libnoson/" LIBVERSION "\r\nConnection: close\r\n"
         "Content-Type: audio/flac\r\nTransfer-Encoding: chunked\r\n\r\n";
-    if (r < 4 || memcmp(buf, "fLaC", 4) != 0) {
+    if (!streamReady) {
         printf("stream %d: no audio before timeout or connection replaced\n", stream);
         std::string error = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         const auto mode = deviceResumeStrategy();
@@ -376,7 +417,8 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
             handle->broker->ReplyData(error.c_str(), error.size());
         }
     } else {
-        printf("stream %d: serving current generation with fresh FLAC header\n", stream);
+        printf("stream %d: serving current generation %s\n", stream,
+            skipMetadata ? "with FLAC audio frames only" : "with fresh FLAC header");
         if (handle->broker->ReplyData(streamingHeaders.c_str(), streamingHeaders.size()) && sendChunk(handle, buf, r)) {
             while (!IsAborted() && (r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed)) > 0) {
                 if (!sendChunk(handle, buf, r)) break;

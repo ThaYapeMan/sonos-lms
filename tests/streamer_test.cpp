@@ -1,6 +1,7 @@
 #include "sbstreamer.h"
 #include "resume_state.h"
 #include "device_resume.h"
+#include "flac_metadata.h"
 #include "private/socket.h"
 #include "private/wsrequestbroker.h"
 #include <FLAC++/decoder.h>
@@ -36,6 +37,7 @@ extern "C" int squeezebox_response_ended(unsigned stream);
 extern "C" int squeezebox_response_open(unsigned stream);
 extern "C" void acknowledge_squeezebox_resume(unsigned stream);
 extern "C" void invalidate_squeezebox_held_get(unsigned stream);
+extern "C" void prepare_squeezebox_frames_resume(unsigned stream);
 std::string SqueezeBoxURL(unsigned id) { return "http://bridge/music/squeezebox.flac?stream=" + std::to_string(id); }
 void ResumeSqueezeBox(unsigned id) {
     std::lock_guard<std::mutex> lock(stateMutex);
@@ -48,13 +50,16 @@ void ResumeSqueezeBox(unsigned id) {
     if (pendingResume && std::chrono::steady_clock::now() >= resumeAt) {
         // Simulate LMS receiving CLI play and answering with strm u, not s.
         assert(state.command('u', squeezebox_response_open(id)) == ResumeState::Unpause::SameURL);
-        invalidate_squeezebox_held_get(id);
+        if (deviceResumeStrategy() == DeviceResume::PlayOnlyFrames)
+            prepare_squeezebox_frames_resume(id);
+        else
+            invalidate_squeezebox_held_get(id);
         acknowledge_squeezebox_resume(id);
         pendingResume = false;
         paused = false;
         // Model PlayStream(same URL): the test's device opens a fresh GET.
         // The cancelled held request closes before the device reconnects.
-        ++sameURLRequests;
+        if (deviceResumeStrategy() != DeviceResume::PlayOnlyFrames) ++sameURLRequests;
     }
 }
 
@@ -242,7 +247,87 @@ static void modeTest() {
     printf("PASS: %s exact cancellation bytes or held PCM; uncancelled timeout remains 503\n", deviceResumeName(mode));
 }
 
+// The new mode is a separate experiment; retain every existing mode test.
+static void framesResumeTest() {
+    assert(deviceResumeStrategy() == DeviceResume::PlayOnlyFrames);
+    SBStreamer broker;
+    state.command('s'); state.observe("PLAYING");
+    Socket initial(1);
+    connection(broker, initial, 1200);
+    playable(initial, 1200); // starting playback / PlayStream still needs metadata
+
+    state.command('p'); state.observe("PAUSED_PLAYBACK");
+    deviceState = "PAUSED_PLAYBACK"; paused = true;
+    end_squeezebox_response();
+    Socket held(1, false, true), standby(1, false, true);
+    auto heldGet = std::async(std::launch::async, [&] { serve(broker, held); });
+    waitUntil([] { return squeezebox_response_open(1); });
+    auto standbyGet = std::async(std::launch::async, [&] { serve(broker, standby); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    assert(!held.headersSent && !standby.headersSent);
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        deviceState = "TRANSITIONING";
+    }
+    waitUntil([] { return !paused.load(); }); // real held-GET callback marks only ACTIVE
+    assert(resumeCommands == 1 && sameURLRequests == 0);
+    feed(1300);
+    waitUntil([&] { return held.audioSeen.load(); });
+    assert(!standby.headersSent);
+    held.clientClosed = true;
+    ready(heldGet);
+    assert(held.headers.find("200 OK") != std::string::npos);
+    assert(held.body.size() > 2 && static_cast<unsigned char>(held.body[0]) == 0xff);
+    assert((static_cast<unsigned char>(held.body[1]) & 0xfe) == 0xf8);
+    // Reattach the original decoder metadata and decode the new frames to
+    // verify the skipper preserved actual PCM, not just a sync-looking prefix.
+    FlacMetadataSkipper metadata;
+    size_t prefix = metadata.consume(initial.body.data(), initial.body.size());
+    assert(metadata.done());
+    Socket continued(1);
+    continued.headers = held.headers;
+    continued.body.assign(initial.body.begin(), initial.body.begin() + prefix);
+    continued.body.insert(continued.body.end(), held.body.begin(), held.body.end());
+    playable(continued, 1300);
+    puts("PASS: only the device-resume GET starts at audio frame sync; original metadata decodes its PCM");
+
+    waitUntil([&] { return standby.headersSent.load(); });
+    feed(1400);
+    waitUntil([&] { return standby.audioSeen.load(); });
+    standby.clientClosed = true;
+    ready(standbyGet);
+    playable(standby, 1400);
+    puts("PASS: promoted standby retains a fresh FLAC header after the frames-only GET ends");
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        state.observe("PLAYING"); state.command('p'); state.observe("PAUSED_PLAYBACK");
+        deviceState = "PAUSED_PLAYBACK"; paused = true;
+    }
+    Socket ordinary(1);
+    auto ordinaryGet = std::async(std::launch::async, [&] { serve(broker, ordinary); });
+    waitUntil([] { return squeezebox_response_open(1); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    prepare_squeezebox_frames_resume(2); // a different stream must not mark this GET
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        assert(state.command('u', true) == ResumeState::Unpause::FeedHeldGet);
+        paused = false; deviceState = "PLAYING";
+    }
+    feed(1500);
+    ready(ordinaryGet);
+    playable(ordinary, 1500);
+    assert(resumeCommands == 1 && sameURLRequests == 0);
+    puts("PASS: ordinary LMS held-GET unpause and wrong-stream marking preserve FLAC metadata");
+
+    Socket later(1);
+    connection(broker, later, 1600);
+    playable(later, 1600);
+    puts("PASS: later normal GET retains FLAC metadata in playonly-frames mode");
+}
+
 int main(int argc, char**) {
+    if (deviceResumeStrategy() == DeviceResume::PlayOnlyFrames) { framesResumeTest(); return 0; }
     if (argc > 1) { modeTest(); return 0; }
 
     setvbuf(stdout, nullptr, _IOLBF, 0);
