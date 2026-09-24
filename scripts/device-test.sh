@@ -23,7 +23,7 @@
 #   LMS         LMS host             (default: LMS_SERVER from config, else discovery log)
 #   PLAYER      LMS player id (MAC)  (default: looked up as "<ROOM> (Sonos)")
 #   TRACK_A     search text, or id:<n> for track A       (default: Just A Little Bit More)
-#   TRACK_B     search text, or id:<n> for track B       (default: Fakse Need)
+#   TRACK_B     search text, or id:<n> for track B       (default: False Need)
 #   SCENARIOS   which scenarios to run                   (default: 1 2 3 4 5 6)
 #   LONG_PAUSE  seconds paused in scenario 6             (default: 120)
 #   LMS_SSH     ssh target for the LMS host; empty skips server.log
@@ -35,7 +35,7 @@ set -uo pipefail
 
 ROOM=${ROOM:-Study}
 TRACK_A=${TRACK_A:-Just A Little Bit More}
-TRACK_B=${TRACK_B:-Fakse Need}
+TRACK_B=${TRACK_B:-False Need}
 SCENARIOS=${SCENARIOS:-1 2 3 4 5 6}
 LONG_PAUSE=${LONG_PAUSE:-120}
 LMS_SSH=${LMS_SSH:-}
@@ -227,6 +227,21 @@ finish() {
 
 play_track() { lms playlistcontrol cmd:load "track_id:$1"; }
 
+# Scenario precondition: track A freshly started by LMS and audibly playing.
+# Each scenario sets up its own start state instead of inheriting the last one.
+setup_playing_a() {
+    local i
+    mark "setup: LMS loads track A"
+    play_track "$TRACK_A_ID"
+    for (( i = 0; i < 20; i++ )); do
+        # Reply: "<player> mode play"
+        [[ $(cli_raw "$PLAYER mode ?") == *" mode play" ]] && break
+        sleep 0.5
+    done
+    wait_s 12
+    snapshot
+}
+
 scenario_1() {
     mark "S1 BASELINE: LMS starts track A, LMS pause/resume (expected clean)"
     play_track "$TRACK_A_ID"; wait_s 20; snapshot
@@ -237,6 +252,7 @@ scenario_1() {
 
 scenario_2() {
     mark "S2 SONOS APP pause/resume x3 on track A"
+    setup_playing_a
     local i
     for i in 1 2 3; do
         prompt "S2.$i press PAUSE in the Sonos app"; wait_s 5; snapshot
@@ -247,21 +263,25 @@ scenario_2() {
 
 scenario_3() {
     mark "S3 LMS track change while playing: A -> B"
-    snapshot
+    setup_playing_a
+    mark "S3 LMS loads track B"
     play_track "$TRACK_B_ID"; wait_s 15; snapshot
     observe "S3: is track B playing on the speaker? (y/n/other)"
 }
 
 scenario_4() {
-    mark "S4 LMS track change while paused (LMS pause, then LMS loads A)"
+    mark "S4 LMS track change while paused (LMS pause, then LMS loads B)"
+    setup_playing_a
+    mark "S4 LMS pause"
     lms pause 1; wait_s 8; snapshot
-    mark "S4 LMS loads track A while paused"
-    play_track "$TRACK_A_ID"; wait_s 15; snapshot
-    observe "S4: is track A playing on the speaker? (y/n/other)"
+    mark "S4 LMS loads track B while paused"
+    play_track "$TRACK_B_ID"; wait_s 15; snapshot
+    observe "S4: is track B playing on the speaker? (y/n/other)"
 }
 
 scenario_5() {
     mark "S5 Sonos-app pause, then LMS track change, then check"
+    setup_playing_a
     prompt "S5 press PAUSE in the Sonos app"; wait_s 8; snapshot
     mark "S5 LMS loads track B while Sonos-paused"
     play_track "$TRACK_B_ID"; wait_s 15; snapshot
@@ -273,6 +293,7 @@ scenario_5() {
 
 scenario_6() {
     mark "S6 long pause from the Sonos app (${LONG_PAUSE}s), then Sonos-app play"
+    setup_playing_a
     prompt "S6 press PAUSE in the Sonos app"
     local left=$LONG_PAUSE
     while (( left > 0 )); do
