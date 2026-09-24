@@ -7,3 +7,4 @@ attic
 
 /resume-state-test
 /streamer-test
+!scripts/*.sh

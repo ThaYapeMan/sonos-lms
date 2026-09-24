@@ -1,0 +1,333 @@
+#!/usr/bin/env bash
+# device-test.sh -- repeatable physical test run for one sonos-squeezebox room.
+#
+# Runs a fixed set of scenarios against a real Sonos speaker. LMS-side steps are
+# driven automatically over the LMS CLI (port 9090); Sonos-app steps are prompted.
+# Everything is captured with one clock and bundled into a single tarball:
+#
+#   steps.log        scenario markers, prompts and your observations
+#   journal.log      bridge journal for the room, with the markers interleaved
+#   lms-events.log   LMS CLI event stream ("listen 1"): every playlist/pause/play
+#   lms-status.log   LMS status every 2 s: mode, track id, position, playlist stamp
+#   lms-server.log   LMS server.log (only when LMS_SSH is set)
+#   capture.pcap     UPnP (1400) + stream + slimproto (3483) traffic
+#
+# Usage (as root on the bridge host):
+#   scripts/device-test.sh                  # all scenarios
+#   SCENARIOS="1 2" scripts/device-test.sh  # a subset
+#   LONG_PAUSE=1200 scripts/device-test.sh  # 20-minute pause in scenario 6
+#   LMS_SSH=root@192.168.178.23 scripts/device-test.sh   # also tail server.log
+#
+# Settings (environment):
+#   ROOM        Sonos room / systemd instance            (default: Study)
+#   LMS         LMS host             (default: LMS_SERVER from config, else discovery log)
+#   PLAYER      LMS player id (MAC)  (default: looked up as "<ROOM> (Sonos)")
+#   TRACK_A     search text, or id:<n> for track A       (default: Just A Little Bit More)
+#   TRACK_B     search text, or id:<n> for track B       (default: Fakse Need)
+#   SCENARIOS   which scenarios to run                   (default: 1 2 3 4 5 6)
+#   LONG_PAUSE  seconds paused in scenario 6             (default: 120)
+#   LMS_SSH     ssh target for the LMS host; empty skips server.log
+#   LMS_LOG     server.log path on the LMS host (default: /var/log/squeezeboxserver/server.log)
+#   LMS_DEBUG   1 = raise LMS log categories for the run, restored afterwards (default: 1)
+#   NO_PCAP     1 = skip tcpdump
+
+set -uo pipefail
+
+ROOM=${ROOM:-Study}
+TRACK_A=${TRACK_A:-Just A Little Bit More}
+TRACK_B=${TRACK_B:-Fakse Need}
+SCENARIOS=${SCENARIOS:-1 2 3 4 5 6}
+LONG_PAUSE=${LONG_PAUSE:-120}
+LMS_SSH=${LMS_SSH:-}
+LMS_LOG=${LMS_LOG:-/var/log/squeezeboxserver/server.log}
+LMS_DEBUG=${LMS_DEBUG:-1}
+NO_PCAP=${NO_PCAP:-0}
+CLI_PORT=${CLI_PORT:-9090}
+SCALE=${SCALE:-1}   # internal: multiplies every wait (used for dry runs)
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+OUT=${OUT:-/tmp/sonos-test-$STAMP}
+mkdir -p "$OUT"
+START_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+PIDS=()
+DEBUG_RESTORE=()
+
+say()  { printf '%s\n' "$*" >&2; }
+fail() { say "Error: $*"; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+now()  { date '+%H:%M:%S.%3N'; }
+
+# ---------------------------------------------------------------- LMS CLI ---
+
+urlenc() {
+    local s=$1 out='' c i
+    for (( i = 0; i < ${#s}; i++ )); do
+        c=${s:i:1}
+        case $c in [a-zA-Z0-9._~-]) out+=$c ;; *) out+=$(printf '%%%02X' "'$c") ;; esac
+    done
+    printf '%s' "$out"
+}
+urldec() { local s=${1//+/ }; printf '%b' "${s//%/\\x}"; }
+
+# One request, one reply line, raw (still URL-encoded).
+cli_raw() {
+    local fd reply=''
+    # Braces scope the 2>/dev/null; a bare "exec ... 2>" would silence the whole script.
+    { exec {fd}<>"/dev/tcp/$LMS/$CLI_PORT"; } 2>/dev/null || return 1
+    printf '%s\n' "$1" >&"$fd"
+    IFS= read -r -t 5 reply <&"$fd"
+    exec {fd}>&-
+    printf '%s' "${reply%$'\r'}"
+}
+
+# Value of the first "key:value" token in a raw reply, decoded.
+field() {
+    local tok
+    for tok in $1; do
+        tok=$(urldec "$tok")
+        [[ $tok == "$2":* ]] && { printf '%s' "${tok#"$2":}"; return 0; }
+    done
+    return 1
+}
+
+lms() { cli_raw "$PLAYER $*" >/dev/null; }
+
+status_line() {
+    local r
+    r=$(cli_raw "$PLAYER status - 1 tags:a") || { printf 'status: no reply'; return; }
+    printf 'mode=%s id=%s time=%s duration=%s index=%s playlist_timestamp=%s tracks=%s title=%s' \
+        "$(field "$r" mode)" "$(field "$r" id)" "$(field "$r" time)" "$(field "$r" duration)" \
+        "$(field "$r" playlist_cur_index)" "$(field "$r" playlist_timestamp)" \
+        "$(field "$r" playlist_tracks)" "$(field "$r" title)"
+}
+
+# "id:<n>" is used as-is; anything else is a title search, first hit wins.
+resolve_track() {
+    local spec=$1 r id
+    if [[ $spec == id:* ]]; then printf '%s' "${spec#id:}"; return 0; fi
+    r=$(cli_raw "titles 0 5 search:$(urlenc "$spec") tags:a") || return 1
+    id=$(field "$r" id) || return 1
+    say "  '$spec' -> id $id: $(field "$r" title) / $(field "$r" artist)"
+    printf '%s' "$id"
+}
+
+resolve_player() {
+    local r tok id='' want="$ROOM (Sonos)"
+    r=$(cli_raw "players 0 100") || return 1
+    for tok in $r; do
+        tok=$(urldec "$tok")
+        case $tok in
+            playerid:*) id=${tok#playerid:} ;;
+            name:*) [[ ${tok#name:} == "$want" ]] && { printf '%s' "$id"; return 0; } ;;
+        esac
+    done
+    return 1
+}
+
+# --------------------------------------------------------------- markers ---
+
+mark() {
+    local line
+    line="[$(now)] === $*"
+    printf '%s\n' "$line" | tee -a "$OUT/steps.log" >&2
+    have logger && logger -t sonos-test "=== $*"
+}
+
+wait_s() {
+    local s
+    s=$(awk -v a="$1" -v b="$SCALE" 'BEGIN { printf "%.2f", a * b }')
+    sleep "$s"
+}
+
+# Ask the tester to do something in the Sonos app; mark the moment they confirm.
+prompt() {
+    say ""
+    say ">>> $*"
+    read -r -p "    press Enter right after you did it " _ || true
+    mark "SONOS APP: $*"
+}
+
+# Record what the tester heard.
+observe() {
+    local answer
+    say ""
+    read -r -p "??? $* " answer || true
+    printf '[%s] OBSERVED: %s -> %s\n' "$(now)" "$*" "${answer:-<no answer>}" | tee -a "$OUT/steps.log" >&2
+    have logger && logger -t sonos-test "OBSERVED: $* -> ${answer:-<no answer>}"
+}
+
+snapshot() { printf '[%s] LMS %s\n' "$(now)" "$(status_line)" | tee -a "$OUT/steps.log" >&2; }
+
+# ------------------------------------------------------------- capturing ---
+
+start_capture() {
+    ( exec {fd}<>"/dev/tcp/$LMS/$CLI_PORT" || exit 1
+      printf 'listen 1\n' >&"$fd"
+      while IFS= read -r line <&"$fd"; do
+          printf '%s %s\n' "$(now)" "$(urldec "${line%$'\r'}")"
+      done ) > "$OUT/lms-events.log" 2>&1 &
+    PIDS+=($!)
+
+    ( while :; do printf '%s %s\n' "$(now)" "$(status_line)"; sleep 2; done ) \
+        > "$OUT/lms-status.log" 2>&1 &
+    PIDS+=($!)
+
+    if [[ $NO_PCAP != 1 ]]; then
+        if have tcpdump; then
+            tcpdump -i any -s 0 -U -w "$OUT/capture.pcap" 'port 1400 or port 3483' \
+                2> "$OUT/tcpdump.err" &
+            PIDS+=($!)
+        else
+            say "  tcpdump not installed: no packet capture (apt install tcpdump)"
+        fi
+    fi
+
+    if [[ -n $LMS_SSH ]]; then
+        ssh -o BatchMode=yes -o ConnectTimeout=5 "$LMS_SSH" "tail -n0 -F '$LMS_LOG'" \
+            > "$OUT/lms-server.log" 2> "$OUT/lms-ssh.err" &
+        PIDS+=($!)
+    fi
+
+    if [[ $LMS_DEBUG == 1 ]]; then
+        local cat old
+        for cat in network.protocol.slimproto player.source player.streaming player.playlist; do
+            # Reply: "debug <category> <LEVEL>"
+            old=$(cli_raw "debug $cat ?" | awk '{print $3}')
+            [[ -n $old && $old != '?' ]] && DEBUG_RESTORE+=("$cat $old")
+            cli_raw "debug $cat INFO" >/dev/null
+        done
+    fi
+    sleep 1
+}
+
+finish() {
+    local entry pid
+    trap - EXIT INT TERM
+    say ""
+    say "Collecting results ..."
+    for entry in "${DEBUG_RESTORE[@]}"; do cli_raw "debug $entry" >/dev/null; done
+    for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null; done
+    wait 2>/dev/null
+    if have journalctl; then
+        journalctl -o short-precise --since "$START_TIME" \
+            _SYSTEMD_UNIT="$UNIT" + SYSLOG_IDENTIFIER=sonos-test > "$OUT/journal.log" 2>&1
+    fi
+    { echo "room=$ROOM unit=$UNIT player=$PLAYER lms=$LMS"
+      echo "track_a=$TRACK_A_ID track_b=$TRACK_B_ID scenarios=$SCENARIOS long_pause=$LONG_PAUSE"
+      echo "started=$START_TIME finished=$(date '+%Y-%m-%d %H:%M:%S')"
+      [[ -d /opt/sonos-squeezebox/.git ]] && echo "bridge=$(git -C /opt/sonos-squeezebox rev-parse --short HEAD)"
+    } > "$OUT/run-info.txt"
+    tar -czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
+    say ""
+    say "Done. Send this file:"
+    say "  $OUT.tar.gz"
+}
+
+# ------------------------------------------------------------- scenarios ---
+
+play_track() { lms playlistcontrol cmd:load "track_id:$1"; }
+
+scenario_1() {
+    mark "S1 BASELINE: LMS starts track A, LMS pause/resume (expected clean)"
+    play_track "$TRACK_A_ID"; wait_s 20; snapshot
+    mark "S1 LMS pause";  lms pause 1; wait_s 5; snapshot
+    mark "S1 LMS resume"; lms pause 0; wait_s 10; snapshot
+    observe "S1: did it resume where it paused? (c=continued, r=restarted, s=silent, other)"
+}
+
+scenario_2() {
+    mark "S2 SONOS APP pause/resume x3 on track A"
+    local i
+    for i in 1 2 3; do
+        prompt "S2.$i press PAUSE in the Sonos app"; wait_s 5; snapshot
+        prompt "S2.$i press PLAY in the Sonos app"; wait_s 8; snapshot
+        observe "S2.$i: continued (c), restarted (r), silent (s), error dialog (e)?"
+    done
+}
+
+scenario_3() {
+    mark "S3 LMS track change while playing: A -> B"
+    snapshot
+    play_track "$TRACK_B_ID"; wait_s 15; snapshot
+    observe "S3: is track B playing on the speaker? (y/n/other)"
+}
+
+scenario_4() {
+    mark "S4 LMS track change while paused (LMS pause, then LMS loads A)"
+    lms pause 1; wait_s 8; snapshot
+    mark "S4 LMS loads track A while paused"
+    play_track "$TRACK_A_ID"; wait_s 15; snapshot
+    observe "S4: is track A playing on the speaker? (y/n/other)"
+}
+
+scenario_5() {
+    mark "S5 Sonos-app pause, then LMS track change, then check"
+    prompt "S5 press PAUSE in the Sonos app"; wait_s 8; snapshot
+    mark "S5 LMS loads track B while Sonos-paused"
+    play_track "$TRACK_B_ID"; wait_s 15; snapshot
+    observe "S5: is track B playing? (y = yes, n = nothing, a = track A came back, other)"
+    prompt "S5 if nothing plays: press PLAY in the Sonos app (otherwise just press Enter)"
+    wait_s 10; snapshot
+    observe "S5 after PLAY: which track plays? (a/b/none/error dialog)"
+}
+
+scenario_6() {
+    mark "S6 long pause from the Sonos app (${LONG_PAUSE}s), then Sonos-app play"
+    prompt "S6 press PAUSE in the Sonos app"
+    local left=$LONG_PAUSE
+    while (( left > 0 )); do
+        printf '\r    paused, %4ds left ' "$left" >&2
+        wait_s 10; (( left -= 10 ))
+        (( left % 60 == 0 )) && snapshot 2>/dev/null
+    done
+    printf '\n' >&2
+    snapshot
+    prompt "S6 press PLAY in the Sonos app"; wait_s 15; snapshot
+    observe "S6: continued (c), restarted (r), silent (s), error dialog (e)?"
+}
+
+# ------------------------------------------------------------------ main ---
+
+[[ $EUID -eq 0 ]] || fail "run as root (tcpdump and journal access)"
+have systemd-escape && UNIT=$(systemd-escape --template=sonos-squeezebox@.service -- "$ROOM") \
+    || UNIT="sonos-squeezebox@$ROOM.service"
+
+if [[ -z ${LMS:-} ]]; then
+    LMS=$(sed -n 's/^[[:space:]]*LMS_SERVER=[[:space:]]*//p' /etc/sonos-squeezebox/config 2>/dev/null | head -n1)
+fi
+if [[ -z ${LMS:-} ]] && have journalctl; then
+    LMS=$(journalctl -u "$UNIT" -n 500 --no-pager 2>/dev/null \
+        | sed -n 's/.*LMS server from [^:]*: \([^ ]*\).*/\1/p' | tail -n1)
+fi
+[[ -n ${LMS:-} ]] || fail "LMS host unknown; run with LMS=<ip>"
+cli_raw "version ?" >/dev/null || fail "no LMS CLI at $LMS:$CLI_PORT"
+
+if have systemctl && ! systemctl is-active --quiet "$UNIT"; then
+    fail "$UNIT is not running"
+fi
+
+PLAYER=${PLAYER:-$(resolve_player)} || true
+[[ -n ${PLAYER:-} ]] || fail "no LMS player named '$ROOM (Sonos)'; set PLAYER=<mac>"
+
+say "Room $ROOM ($UNIT), LMS $LMS, player $PLAYER"
+say "Tracks:"
+TRACK_A_ID=$(resolve_track "$TRACK_A") || fail "track A not found: $TRACK_A"
+TRACK_B_ID=$(resolve_track "$TRACK_B") || fail "track B not found: $TRACK_B"
+say "Output: $OUT"
+say ""
+say "Scenarios $SCENARIOS. Keep the Sonos app open on room $ROOM."
+say "When asked, do the action first, then press Enter immediately."
+read -r -p "Press Enter to start " _ || true
+
+trap finish EXIT
+trap 'exit 130' INT TERM
+start_capture
+mark "RUN START room=$ROOM player=$PLAYER track_a=$TRACK_A_ID track_b=$TRACK_B_ID"
+snapshot
+
+for s in $SCENARIOS; do
+    if declare -F "scenario_$s" >/dev/null; then "scenario_$s"; else say "unknown scenario $s"; fi
+done
+
+mark "RUN END (LMS pause)"
+lms pause 1
