@@ -24,6 +24,8 @@
 #   PAUSE_SECS   seconds to stay paused per round    (default: 10)
 #   MIME         content type announced to Sonos    (default: the station's own)
 #   NO_PCAP      1 = skip tcpdump
+#   STOP_ON_PAUSE 1 = right after the app pause, send UPnP Stop (turns the app's
+#                resume into a fresh start from STOPPED, like the first Play)
 #
 # Why MP3 by default: Sonos accepts an MP3 live stream as "radio"; Radio
 # Paradise's /flac is Ogg FLAC, which Sonos rejected on 2026-09-24 (HEAD + RST
@@ -43,6 +45,7 @@ PORT=${PORT:-8990}
 ROUNDS=${ROUNDS:-3}
 PAUSE_SECS=${PAUSE_SECS:-10}
 NO_PCAP=${NO_PCAP:-0}
+STOP_ON_PAUSE=${STOP_ON_PAUSE:-0}
 HOST_IP=${HOST_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
@@ -124,7 +127,7 @@ finish() {
         systemctl start "$UNIT" && mark "bridge $UNIT started again"
     fi
     { echo "source=$SOURCE_NAME mime=$MIME format=$FORMAT"
-      echo "sonos=$SONOS_IP host=$HOST_IP port=$PORT rounds=$ROUNDS pause=$PAUSE_SECS"
+      echo "sonos=$SONOS_IP host=$HOST_IP port=$PORT rounds=$ROUNDS pause=$PAUSE_SECS stop_on_pause=$STOP_ON_PAUSE"
     } > "$OUT/run-info.txt"
     tar -czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
     say ""; say "Done. Send this file:"; say "  $OUT.tar.gz"
@@ -189,6 +192,13 @@ for (( r = 1; r <= ROUNDS; r++ )); do
     prompt "R$r press PAUSE in the Sonos app"
     if wait_state PAUSED_PLAYBACK 10; then mark "R$r PAUSE OK ($(sonos_state))"
     else mark "R$r PAUSE NOT CONFIRMED ($(sonos_state))"; fi
+    if [[ $STOP_ON_PAUSE == 1 ]]; then
+        sleep 1
+        soap Stop "" > "$OUT/stop-r$r.xml"
+        if wait_state STOPPED 5; then mark "R$r UPnP Stop sent -> $(sonos_state)"
+        else mark "R$r UPnP Stop sent, speaker NOT STOPPED ($(sonos_state))"; fi
+        observe "R$r: after the Stop, does the app still show a Play button and no error? (y/n)"
+    fi
     sleep "$PAUSE_SECS"
     prompt "R$r press PLAY in the Sonos app"
     if wait_state PLAYING 15; then mark "R$r RESUME OK ($(sonos_state))"
