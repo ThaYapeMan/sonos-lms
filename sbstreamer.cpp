@@ -184,7 +184,7 @@ void SBStreamer::registerWith(upnp::StreamServer& server)
 
 bool SBStreamer::HandleRequest(upnp::StreamRequest* handle)
 {
-    if (IsAborted())
+    if (IsAborted() || handle->aborted())
         return false;
 
     const std::string& requestUri = handle->path();
@@ -289,14 +289,14 @@ void SBStreamer::streamSqueezeBox(upnp::StreamRequest* handle, int stream)
             if (peerClosed()) {
                 printf("stream %d: GET #%llu standby closed by client\n", stream, request->id);
                 disconnect = true;
-            } else if (!obsolete && !request->pauseEnded && !IsAborted()
+            } else if (!obsolete && !request->pauseEnded && !(IsAborted() || handle->aborted())
                        && !sonos_lms_is_paused() && activeRequest
                        && activeRequest->encoder->hasAudio()
                        && std::chrono::steady_clock::now() >= standbyDeadline) {
                 printf("stream %d: GET #%llu standby timeout\n", stream, request->id);
                 disconnect = true;
             }
-            disconnect = disconnect || request->pauseEnded || IsAborted();
+            disconnect = disconnect || request->pauseEnded || (IsAborted() || handle->aborted());
             if (obsolete || disconnect)
                 standbyRequests.erase(std::remove(standbyRequests.begin(), standbyRequests.end(), request),
                                       standbyRequests.end());
@@ -316,7 +316,7 @@ void SBStreamer::streamSqueezeBox(upnp::StreamRequest* handle, int stream)
     auto waitingForAudio = [&] {
         return !enc->hasAudio() || (request->heldResume && !request->resumeAcknowledged);
     };
-    while (opened && waitForResumeAudio && waitingForAudio() && !enc->cancelled() && !enc->responseEnded() && !IsAborted() && !peerClosed()
+    while (opened && waitForResumeAudio && waitingForAudio() && !enc->cancelled() && !enc->responseEnded() && !(IsAborted() || handle->aborted()) && !peerClosed()
            && (unsigned)stream == get_squeezebox_stream_id()
            && std::chrono::steady_clock::now() < deadline) {
         // A marked resume already sent LMS play. Its q/s reply may clear the
@@ -378,7 +378,7 @@ void SBStreamer::streamSqueezeBox(upnp::StreamRequest* handle, int stream)
             return send(header, length) && send(data, size) && send("\r\n", 2);
         };
         if (send(streamingHeaders.c_str(), streamingHeaders.size()) && sendChunk(buf, r)) {
-            while (!IsAborted() && (r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed)) > 0) {
+            while (!(IsAborted() || handle->aborted()) && (r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed)) > 0) {
                 if (!sendChunk(buf, r)) break;
             }
             send("0\r\n\r\n", 5);

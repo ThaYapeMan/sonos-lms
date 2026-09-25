@@ -274,6 +274,27 @@ FLAC file served by a minimal relay reproduced the exact same error. Only then
 was it clear that the bridge had never been the problem. That pointed to a
 simple fix: stop instead of pause.
 
+## The UPnP layer
+
+`SONOS_LMS_UPNP=noson|own` selects speaker discovery and control, once at startup.
+The default is `noson`. `own` is **experimental in phase 1** and must pass physical
+S1–S7 testing before changing the default. For example:
+
+```sh
+SONOS_LMS_UPNP=own ./sonos-lms --room="Sonos Port" --server=192.168.178.10
+```
+
+For a service, set `Environment=SONOS_LMS_UPNP=own` in its systemd override.
+Own mode discovers speakers with SSDP, maps room/group topology, and sends SOAP
+control directly. Transport state is polled every 500 ms instead of using GENA
+events; slow/failed calls can extend that interval. Group changes are logged only:
+this phase does not coordinate grouped-room transport or LMS sync. The HTTP stream,
+artwork and file server still use noson in both modes. Pause defaults to Stop and
+all existing stream/session/resume rules remain in effect.
+
+See [the UPnP layer inventory and wire fixtures](docs/upnp-layer.md). No SMAPI
+library service or external-playback ownership policy is enabled by this switch.
+
 ## Related
 
 [philippe44/LMS-uPnP](https://github.com/philippe44/LMS-uPnP) takes the opposite

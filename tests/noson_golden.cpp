@@ -15,7 +15,13 @@ int main(int argc, char** argv) {
     item.SetProperty(res);
     std::cout << item.DIDL() << '\n';
     if (argc > 1) {
-        SONOS::AVTransport avt("127.0.0.1", std::strtoul(argv[1], nullptr, 10));
-        return avt.SetCurrentURI(url, item.DIDL()) ? 0 : 1;
+        SONOS::AVTransport avt("127.0.0.1", std::strtoul(argv[argc - 1], nullptr, 10));
+        if (!avt.SetCurrentURI(url, item.DIDL())) return 1;
+        if (argc > 2) {
+            SONOS::ElementList vars;
+            if (!avt.Play() || !avt.Pause() || !avt.Stop() || !avt.GetTransportInfo(vars)
+                || !avt.GetPositionInfo(vars) || !avt.GetMediaInfo(vars)) return 1;
+        }
+        return 0;
     }
 }

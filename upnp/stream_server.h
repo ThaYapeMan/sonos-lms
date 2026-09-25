@@ -15,6 +15,7 @@ public:
     virtual void sendTimeout(unsigned milliseconds) = 0;
     virtual void disconnect() = 0;
     virtual void reply(unsigned status, const std::string& contentType = {}) = 0;
+    virtual bool aborted() const { return false; }
     virtual std::string serverName() const = 0;
 };
 struct StreamResource { std::string uri, iconUri; };

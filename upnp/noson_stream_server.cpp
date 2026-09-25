@@ -9,14 +9,16 @@
 #include "private/tokenizer.h"
 #include "private/uriencoder.h"
 #include <cerrno>
+#include <mutex>
 #include <sys/socket.h>
 
 namespace upnp {
 namespace {
 class Request : public StreamRequest {
     SONOS::WSRequestBroker& broker;
+    SONOS::RequestBroker* route;
 public:
-    explicit Request(SONOS::WSRequestBroker& b) : broker(b) {}
+    explicit Request(SONOS::WSRequestBroker& b, SONOS::RequestBroker* r = nullptr) : broker(b), route(r) {}
     std::string path() const override { return broker.GetRequestPath(); }
     Method method() const override {
         return broker.GetRequestMethod() == WS_METHOD_Get ? Method::Get :
@@ -49,6 +51,7 @@ public:
         if (!type.empty()) reply.AddHeader(WS_HEADER_Content_Type, type);
         reply.PostReply(status == 200 ? WS_STATUS_200_OK : WS_STATUS_400_Bad_Request);
     }
+    bool aborted() const override { return route && route->IsAborted(); }
     std::string serverName() const override { return "libnoson/" LIBVERSION; }
 };
 class Route : public SONOS::RequestBroker {
@@ -59,7 +62,7 @@ public:
     Route(const std::string& n, ResourcePtr r, StreamServer::Handler h) : name(n), res(r), handler(h) {}
     bool HandleRequest(handle* h) override {
         if (IsAborted()) return false;
-        Request request(*h->broker);
+        Request request(*h->broker, this);
         return handler(request);
     }
     const char* CommonName() override { return name.c_str(); }
@@ -71,6 +74,7 @@ public:
 }
 struct NosonStreamServer::Impl {
     SONOS::System system;
+    std::mutex uriMutex;
     SONOS::RequestBrokerPtr images;
     explicit Impl(void (*event)(void*)) : system(nullptr, event), images(new SONOS::ImageService()) {}
 };
@@ -97,6 +101,7 @@ StreamResource NosonStreamServer::resource(const std::string& name) {
     return r ? StreamResource{r->uri, r->iconUri} : StreamResource{};
 }
 unsigned NosonStreamServer::port() {
+    std::lock_guard<std::mutex> lock(impl->uriMutex);
     const auto& uri = impl->system.GetSystemLocalUri();
     auto colon = uri.rfind(':');
     return colon == std::string::npos ? 0 : std::strtoul(uri.c_str() + colon + 1, nullptr, 10);

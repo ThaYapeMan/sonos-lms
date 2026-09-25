@@ -12,6 +12,8 @@
 #include <chrono>
 #include <cstring>
 #include <cerrno>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <future>
 #include <iostream>
 #include <mutex>
@@ -80,6 +82,7 @@ public:
         memcpy(buf, input.data() + offset, n); offset += n; return n;
     }
     bool SendData(const char* data, size_t n) override {
+        if (failureFd >= 0) return ::send(failureFd, data, n, MSG_NOSIGNAL) == static_cast<ssize_t>(n);
         if (drop || clientClosed.load() || sendError.load()) { errno = ECONNRESET; return false; }
         wire.append(data, n);
         if (n == 5 && memcmp(data, "0\r\n\r\n", 5) == 0) {
@@ -106,6 +109,7 @@ public:
     }
     bool IsValid() const override { return !disconnected.load() && !clientClosed.load(); }
     void Disconnect() override { disconnected = true; }
+    int failureFd = -1;
     std::atomic<bool> clientClosed{false}, sendError{false};
     std::atomic<unsigned> audioPackets{0};
     std::atomic<bool> headersSent{false}, audioSeen{false}, eof{false}, disconnected{false};
@@ -370,6 +374,19 @@ static void sessionTest() {
 }
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "send-error-real") {
+        int sockets[2];
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+        close(sockets[1]); // real kernel send() must now fail with EPIPE
+        SBStreamer broker;
+        Socket broken(1);
+        broken.failureFd = sockets[0];
+        serve(broker, broken);
+        close(sockets[0]);
+        assert(broken.disconnected && broken.wire.empty());
+        puts("PASS: real closed-peer socket ends response");
+        return 0;
+    }
     if (argc > 1 && std::string(argv[1]) == "send-error") {
         SBStreamer broker;
         Socket broken(1);

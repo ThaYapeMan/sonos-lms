@@ -51,11 +51,11 @@ Status::Snapshot Status::poll() const
     s.trackDuration = kNoPosition;
 
     if (!m_player) return s;
-    const auto transport = m_player->transportInfo();
-    if (!transport.available) return s;
+    if (!m_player->transportInfo().available) return s;
     s.volume = m_player->displayVolume();
     uint32_t ms;
     m_player->positionInfo(ms, &s.relativeTime);
+    const auto transport = m_player->transportInfo();
     s.title = transport.title; s.album = transport.album; s.artist = transport.artist;
     s.transportStatus = transport.status; s.transportState = transport.state;
     s.trackDuration = transport.duration;
@@ -64,6 +64,7 @@ Status::Snapshot Status::poll() const
 
 void Status::update()
 {
+    if (m_player) m_player->poll();
     m_current = poll();
 }
 

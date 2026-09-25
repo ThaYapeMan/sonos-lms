@@ -12,3 +12,7 @@ attic
 
 
 /position-test
+
+/upnp-test
+/own-control-test
+/noson-golden

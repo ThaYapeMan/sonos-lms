@@ -17,12 +17,12 @@ Paths without a prefix are repository-root paths.
 | Calls / types and original file:line | Wire work and result | Caller |
 |---|---|---|
 | `System`, `PlayerPtr` (`sonos-lms.cpp:61`, `:62`), `System::Debug`, constructor (`:859`) | Own subscriptions, listener and player; callback sets atomic gEvent. Debug changes logging only. | main; callback on noson event thread |
-| `System::Discover()` / `Discover(url)` (`sonos-lms.cpp:669`, `:680`) | SSDP multicast discovery (or explicit seed); device description and topology/subscriptions initialize the household. Returns startup success. | main startup |
+| `System::Discover()` / `Discover(url)` (`sonos-lms.cpp:669`, `:680`) | SSDP broadcast/multicast discovery (or explicit seed); LOCATION supplies the host/port, topology/subscriptions initialize the household. Returns startup success. | main startup |
 | `GetZonePlayerList`, `ZonePlayerList` (`sonos-lms.cpp:619`, `:872`); player `GetUUID/GetHost/GetPort` (`:625`) | Cached topology; printed device table. | main startup |
 | `GetZoneList`, `ZoneList`, zone `GetZoneName/GetCoordinator` (`sonos-lms.cpp:632`, `:646`, `:875`) | Cached topology; exact case-sensitive combined zone name (`Study + Sonos Port`), not whitespace token matching. | main startup |
 | `GetPlayer(zone, ..., callback)` (`sonos-lms.cpp:652`) | Controller for coordinator, subscriptions to AVTransport and RenderingControl. Failure aborts startup. | main startup |
 | `GetTransportProperty`, `AVTProperty.TransportStatus` (`sonos-lms.cpp:141`) | Cached event data; ERROR_LOST_CONNECTION triggers same-URL PlayStream recovery. No SOAP polling here. | transport |
-| `Stop/Pause/Play` (`sonos-lms.cpp:167`, `:288`) | AVTransport SOAP Stop, Pause, Play; InstanceID=0, Play Speed=1. Result drives bounded retries. HTTP EOF precedes Pause/Stop. | transport |
+| `Stop/Pause/Play` (`sonos-lms.cpp:167`, `:288`) | AVTransport SOAP Stop, Pause, Play; InstanceID=0, Speed=1 on all three (including noson’s extra Speed argument on Pause/Stop). Result drives bounded retries. HTTP EOF precedes Pause/Stop. | transport |
 | `GetRequestBroker`, `GetResource`, `ResourcePtr.uri/iconUri` (`sonos-lms.cpp:501`, `:560`) | Local lookup builds URL with session token and stream number, or artwork fallback. | main / HTTP redirect |
 | `GetControllerUri` (`sonos-lms.cpp:504`, `:565`, `:698`) | Local controller address reachable from speaker plus listener port; no SOAP. | main / HTTP redirect |
 | `GetTransportProperty().TransportState` (`sonos-lms.cpp:536`) | Event cache drives ObserveDeviceTransport and held-GET resume. Must remain nonblocking on HTTP worker. | HTTP / main |
@@ -93,3 +93,69 @@ change ownership policy in this phase.
 
 Display volume is a separate interface call because noson GetVolume performs SOAP.
 It must never be called by the cached transport read on an HTTP worker.
+
+
+## Own backend (experimental)
+
+`SONOS_LMS_UPNP` is read and logged once at startup. Unset means noson; invalid
+values warn and select noson. `OwnSpeakerControl` has no noson includes or calls.
+It sends SSDP M-SEARCH to 239.255.255.250:1900 with the ZonePlayer:1 ST, waits
+three seconds and retries once if no valid replies arrive. `--ip` bypasses SSDP.
+It obtains ZoneGroupState via `/ZoneGroupTopology/Control`, then matches an exact,
+case-sensitive individual room name (spaces preserved), or noson's combined group
+name. Invisible bonded members are excluded. Ambiguous names fail discovery.
+
+The selected physical room's address remains the transport target. A group change
+only updates/logs the topology; it does not redirect commands to a new coordinator,
+regroup speakers, or alter LMS sync. Topology is checked every five seconds from
+the status loop; unavailable/malformed topology keeps the last good snapshot.
+`controllerUri()` combines getsockname on the socket connected to the selected
+speaker with the actual port of NosonStreamServer, including listener port fallback.
+
+Own transport state is polled by Status::update on the existing main status loop
+at a 500 ms interval. The resulting snapshot feeds the same refreshStatus,
+ObserveDeviceTransport and ResumeSqueezeBox functions as GENA in noson mode.
+HTTP workers only read the snapshot; they never poll or hold a SOAP I/O lock.
+The usual detection delay is up to 500 ms plus network/loop work, unlike immediate
+GENA notifications. A slow control, position or topology call can extend the delay;
+each HTTP SOAP exchange has one five-second deadline including connect/send/read.
+Position uses a one-second cache. Failed polls mark transport unavailable instead
+of inventing STOPPED or replaying a stale transition. Own mode has no volume or
+track-metadata subscription, so the legacy status table's optional display fields
+are empty/zero; this does not affect transport control or stream metadata.
+
+All seven AVTransport actions use `/MediaRenderer/AVTransport/Control`, InstanceID
+0 and the service namespace `urn:schemas-upnp-org:service:AVTransport:1`.
+GetMediaInfo returns CurrentURI independently of TrackURI. PlayStream issues Play
+only after SetAVTransportURI succeeds. UPnP faults log action, errorCode and
+errorDescription, including HTTP 500 responses.
+
+The reusable XML reader supports local-name tag lookup, quoted attributes, the
+five predefined entities, numeric Unicode references, comments and CDATA. It
+rejects malformed trees, DTDs/external entities, excessive depth and inputs over
+2 MiB. It is a minimal UPnP reader, not a schema validator. The HTTP client accepts
+numeric IPv4 endpoints and handles Content-Length, chunked and close-delimited
+responses under a single deadline and size bound; it performs no DNS or redirects.
+These helpers contain no bridge state and implement no SMAPI functionality.
+
+`make test` includes XML/SSDP/topology tests and a loopback mock HTTP speaker.
+The mock captures all seven requests from the actual linked noson AVTransport
+client and compares own requests byte-for-byte (including the legacy Speed=1 on
+Pause/Stop). It also verifies the committed SetAVTransportURI fixture, CurrentURI,
+SOAP faults, chunked/truncated responses, deadlines, cached nonblocking reads,
+group-change logging, and real own polling feeding the extracted production
+ObserveDeviceTransport/ResumeSqueezeBox code. Physical S1–S7 testing remains a
+separate release gate, performed by the user; no deployment is part of these tests.
+
+
+Noson startup also has implicit wire traffic behind System::Discover:
+`sonossystem.cpp:105` subscribes to `/ZoneGroupTopology/Event`, waits up to 3 s for
+NOTIFY and falls back to GetZoneGroupState at `/ZoneGroupTopology/Control`.
+It calls GetHouseholdID and GetZoneInfo at `/DeviceProperties/Control`, loads
+music services via ListAvailableServices at `/MusicServices/Control`, and subscribes
+to `/AlarmClock/Event` and `/MediaServer/ContentDirectory/Event`. Player::Init
+(`sonosplayer.cpp:114`) opens a TCP connection to select the local interface,
+subscribes each group member's RenderingControl plus coordinator AVTransport and
+ContentDirectory. System's event handler owns subscription renewal and dispatch.
+Those noson-side ancillary services remain in default mode; own mode needs only
+topology and AVTransport and does not initialize them.

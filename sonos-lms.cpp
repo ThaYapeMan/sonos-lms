@@ -11,6 +11,8 @@
 // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 
 #include "upnp/noson_speaker_control.h"
+#include "upnp/own_speaker_control.h"
+#include "upnp/backend.h"
 #include "upnp/noson_stream_server.h"
 
 #include "resume_state.h"
@@ -657,6 +659,7 @@ void runBridgeLoop(bridge::Status& status)
     constexpr unsigned kStatusRefreshTicks = 3000;  // ~30s at the 10ms sleep below
 
     status.update();
+    auto nextPoll = std::chrono::steady_clock::now() + std::chrono::milliseconds(gPlayer->pollIntervalMs());
 
     for (;;) {
         dispatchStreamStart();
@@ -664,7 +667,10 @@ void runBridgeLoop(bridge::Status& status)
         pollSonosPosition();
 
         const bool eventPending = gEvent.exchange(false);
-        if (idleTicks >= kStatusRefreshTicks || eventPending) {
+        const auto pollInterval = gPlayer->pollIntervalMs();
+        const bool pollDue = pollInterval && std::chrono::steady_clock::now() >= nextPoll;
+        if (idleTicks >= kStatusRefreshTicks || eventPending || pollDue) {
+            nextPoll = std::chrono::steady_clock::now() + std::chrono::milliseconds(pollInterval);
             refreshStatus(status);
             idleTicks = 0;
         } else {
@@ -755,6 +761,7 @@ int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     (void)pauseMode();
+    const auto backend = upnp::backend();
     try {
         printf("Stream session: %s\n", streamSessionToken().c_str());
     } catch (const std::exception& error) {
@@ -772,7 +779,10 @@ int main(int argc, char** argv)
 
     auto serverBackend = new upnp::NosonStreamServer(debugLevel, onSonosEvent);
     gStreamServer.reset(serverBackend);
-    gPlayer = std::make_shared<upnp::NosonSpeakerControl>(*serverBackend, onSonosEvent);
+    if (backend == upnp::Backend::Own)
+        gPlayer = std::make_shared<upnp::OwnSpeakerControl>([] { return gStreamServer->port(); });
+    else
+        gPlayer = std::make_shared<upnp::NosonSpeakerControl>(*serverBackend, onSonosEvent);
     if (!room) {
         printf("Please specify a room to join with the --room option\n");
         return EXIT_FAILURE;
