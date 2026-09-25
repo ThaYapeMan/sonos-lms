@@ -18,6 +18,7 @@
 #include <sonossystem.h>
 
 #include "resume_state.h"
+#include "transport_intent.h"
 #include "pause_mode.h"
 #include "sbstreamer.h"
 #include "sonos-position.h"
@@ -75,6 +76,8 @@ static std::mutex resumeMutex;
 static ResumeState resumeState;
 extern "C" int sonos_lms_is_paused(void) { return lmsPaused.load(); }
 static std::mutex transportMutex;
+static std::mutex intentMutex;
+static TransportIntent transportIntent;
 extern "C" void end_squeezebox_response(void);
 extern "C" int squeezebox_response_ended(unsigned stream);
 extern "C" int squeezebox_response_open(unsigned stream);
@@ -96,70 +99,37 @@ extern "C" void new_squeezebox_stream_id(void)
     printf("Creating new stream (%u) for Sonos\n", id);
 }
 
-extern "C" void sonos_lms_transport(char command)
+static void dispatchTransportIntent()
 {
-    if (command == 's' || command == 'p' || command == 'u') {
-        std::lock_guard<std::mutex> lock(stopMutex);
-        bool pending = deferredStop.cancel();
-        if (pending && command == 's')
-            printf("strm q: superseded by strm s, no Pause\n");
-    }
-    ResumeState::Unpause unpause;
-    bool responseOpen;
+    std::unique_lock<std::mutex> transport(transportMutex, std::try_to_lock);
+    if (!transport.owns_lock() || stream_just_restarted() || !ourStreamStarted.load() || !gPlayer)
+        return;
+    TransportIntent intent;
     {
-        std::lock_guard<std::mutex> lock(resumeMutex);
-        responseOpen = command == 'u' && squeezebox_response_open(streamId.load());
-        unpause = resumeState.command(command, responseOpen);
-        if (pauseMode() == PauseMode::Stop && responseOpen
-            && unpause == ResumeState::Unpause::SameURL)
-            unpause = ResumeState::Unpause::FeedHeldGet;
+        std::lock_guard<std::mutex> lock(intentMutex);
+        if (!transportIntent.pending) return;
+        intent = transportIntent;
+        transportIntent.pending = false; // a newer revision can arrive during I/O
     }
-    // Heartbeats still pass through ResumeState, but need no decision log.
-    if (command != 't') {
-        const char* decision = "None";
-        switch (unpause) {
-        case ResumeState::Unpause::NewStream: decision = "NewStream"; break;
-        case ResumeState::Unpause::FeedHeldGet: decision = "FeedHeldGet"; break;
-        case ResumeState::Unpause::SameURL: decision = "SameURL"; break;
-        case ResumeState::Unpause::None: break;
-        }
-        printf("strm %c: decision=%s stream=%u\n", command, decision, streamId.load());
-    }
-    if (command == 's') {
-        reset_sonos_position(streamId.load());
-        ++lmsStreamSerial; // release a producer waiting on an obsolete HTTP request
-        lmsPaused.store(false);
+    const char command = intent.command;
+    const bool pause = command == 'p';
+    auto unpause = intent.unpause;
+    // A new stream's successful PlayStream already satisfies a deferred play.
+    if (!pause && intent.stream != streamId.load()) {
+        if (intent.deferred) printf("strm u: deferred intent applied by new stream\n");
         return;
-    }
-    if (command != 'p' && command != 'q' && command != 'u') return;
-    bool pause = command != 'u';
-    lmsPaused.store(pause);
-    if (!ourStreamStarted.load()) {
-        printf("strm %c: transport ignored before first bridge stream\n", command);
-        return;
-    }
-    if (unpause == ResumeState::Unpause::NewStream) {
-        printf("strm u: new stream pending from strm s, no same-URL resume\n");
-        return; // decoded track boundary allocates the ID and calls PlaySqueezeBox
     }
     if (unpause == ResumeState::Unpause::FeedHeldGet) {
-        printf("strm u: feeding held GET, no same-URL resume\n");
-        acknowledge_squeezebox_resume(streamId.load());
-        return; // process_strm releases PCM into the existing encoder
+        if (squeezebox_response_open(streamId.load())) {
+            printf("strm u: feeding held GET, no same-URL resume\n");
+            acknowledge_squeezebox_resume(streamId.load());
+            if (intent.deferred) printf("strm u: deferred transport applied\n");
+            return;
+        }
+        // A preceding command may have ended the GET while this intent waited.
+        unpause = ResumeState::Unpause::SameURL;
     }
-    if (command == 'q') {
-        end_squeezebox_response();
-        std::lock_guard<std::mutex> lock(stopMutex);
-        deferredStop.schedule(StopDebounce::Clock::now());
-        printf("strm q: deferring Pause for 400 ms\n");
-        return; // receive the next strm s without waiting on UPnP
-    }
-    std::unique_lock<std::mutex> lock(transportMutex, std::try_to_lock);
-    if (!lock.owns_lock() || stream_just_restarted()) {
-        printf("strm %c: transport suppressed during stream restart\n", command);
-        return;
-    }
-    if (gPlayer) {
+    {
         bool ended = !pause && squeezebox_response_ended(streamId.load());
         bool missing = unpause == ResumeState::Unpause::SameURL;
         bool error = !pause && gPlayer->GetTransportProperty().TransportStatus == "ERROR_LOST_CONNECTION";
@@ -191,7 +161,80 @@ extern "C" void sonos_lms_transport(char command)
                 std::chrono::steady_clock::now() - upnpStart).count();
             printf("gPlayer->%s took %lldms\n", pause ? (stopForPause ? "Stop" : "Pause") : "Play", (long long)upnpMs);
         }
+        if (ok && intent.deferred) printf("strm %c: deferred transport applied\n", command);
         if (!ok) printf("strm %c: device transport command failed\n", command);
+    }
+}
+
+extern "C" void sonos_lms_transport(char command)
+{
+    if (command == 's' || command == 'p' || command == 'u') {
+        std::lock_guard<std::mutex> lock(stopMutex);
+        bool pending = deferredStop.cancel();
+        if (pending && command == 's')
+            printf("strm q: superseded by strm s, no Pause\n");
+    }
+    ResumeState::Unpause unpause;
+    bool responseOpen;
+    {
+        std::lock_guard<std::mutex> lock(resumeMutex);
+        responseOpen = command == 'u' && squeezebox_response_open(streamId.load());
+        unpause = resumeState.command(command, responseOpen);
+        if (pauseMode() == PauseMode::Stop && responseOpen
+            && unpause == ResumeState::Unpause::SameURL)
+            unpause = ResumeState::Unpause::FeedHeldGet;
+    }
+    uint64_t revision = 0;
+    if (command == 'p' || command == 'u' || command == 's' || command == 'q') {
+        std::lock_guard<std::mutex> lock(intentMutex);
+        revision = ++transportIntent.revision;
+        transportIntent.command = command;
+        transportIntent.stream = streamId.load();
+        transportIntent.unpause = unpause;
+        transportIntent.deferred = false;
+        lmsPaused.store(command == 'p' || command == 'q');
+        transportIntent.pending = (command == 'p' || command == 'u')
+            && unpause != ResumeState::Unpause::NewStream && streamId.load() != 0;
+    }
+    // Heartbeats still pass through ResumeState, but need no decision log.
+    if (command != 't') {
+        const char* decision = "None";
+        switch (unpause) {
+        case ResumeState::Unpause::NewStream: decision = "NewStream"; break;
+        case ResumeState::Unpause::FeedHeldGet: decision = "FeedHeldGet"; break;
+        case ResumeState::Unpause::SameURL: decision = "SameURL"; break;
+        case ResumeState::Unpause::None: break;
+        }
+        printf("strm %c: decision=%s stream=%u\n", command, decision, streamId.load());
+    }
+    if (command == 's') {
+        reset_sonos_position(streamId.load());
+        ++lmsStreamSerial; // release a producer waiting on an obsolete HTTP request
+        return;
+    }
+    if (command != 'p' && command != 'q' && command != 'u') return;
+    if (!ourStreamStarted.load() && (streamId.load() == 0 || command == 'q')) {
+        printf("strm %c: transport ignored before first bridge stream\n", command);
+        return;
+    }
+    if (unpause == ResumeState::Unpause::NewStream) {
+        printf("strm u: new stream pending from strm s, no same-URL resume\n");
+        return; // decoded track boundary allocates the ID and calls PlaySqueezeBox
+    }
+    if (command == 'q') {
+        end_squeezebox_response();
+        std::lock_guard<std::mutex> lock(stopMutex);
+        deferredStop.schedule(StopDebounce::Clock::now());
+        printf("strm q: deferring Pause for 400 ms\n");
+        return; // receive the next strm s without waiting on UPnP
+    }
+    dispatchTransportIntent();
+    {
+        std::lock_guard<std::mutex> lock(intentMutex);
+        if (transportIntent.revision == revision && transportIntent.pending) {
+            transportIntent.deferred = true;
+            printf("strm %c: transport deferred until restart/transport ready\n", command);
+        }
     }
 }
 
@@ -220,6 +263,7 @@ class StopTimer {
 public:
     StopTimer() : worker([this] {
         while (running.load()) {
+            dispatchTransportIntent();
             dispatchDeferredStop();
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }

@@ -1,4 +1,5 @@
 #include "resume_state.h"
+#include "transport_intent.h"
 #include "pause_mode.h"
 #include "stop_debounce.h"
 #include <atomic>
@@ -12,7 +13,8 @@
 #include <thread>
 static std::atomic<bool> ourStreamStarted{true}, lmsPaused{false};
 static std::atomic<unsigned> streamId{6}, lmsStreamSerial{0}, completedStream{6};
-static std::mutex resumeMutex, stopMutex, transportMutex;
+static std::mutex resumeMutex, stopMutex, transportMutex, intentMutex;
+static TransportIntent transportIntent;
 static ResumeState resumeState;
 static StopDebounce deferredStop;
 static bool stream_just_restarted() { return streamId.load() != completedStream.load(); }
@@ -56,7 +58,7 @@ struct FakePlayer {
 } player;
 static FakePlayer* gPlayer = &player;
 static int gServer = 0, gMac = 0;
-static bool squeezebox_response_open(unsigned id) { assert(id == 6); return responseOpen; }
+static bool squeezebox_response_open(unsigned id) { assert(id == streamId.load()); return responseOpen; }
 static bool squeezebox_response_ended(unsigned id) { assert(id == 6); return responseEnded; }
 static void end_squeezebox_response() {
     ++responseEnds;
@@ -141,12 +143,15 @@ static void paused(const char* status) {
 }
 
 #include "stop_pause_cases.h"
+#include "transport_intent_cases.h"
 
 int main() {
+    transportIntentCases();
     if (pauseMode() == PauseMode::Stop) { stopPauseCases(); return 0; }
     // Isolate logging from device I/O, and check heartbeats between every
     // supported transport command rather than only at startup.
     ourStreamStarted = false;
+    streamId = 0;
     for (char command : std::string("afpqsu")) {
         unsigned before = decisionLogs;
         sonos_lms_transport('t');
@@ -157,6 +162,7 @@ int main() {
     resumeState = ResumeState{};
     lmsPaused = false;
     ourStreamStarted = true;
+    streamId = 6;
     puts("PASS: heartbeat skips the decision log; a/f/p/q/s/u each retain it");
     for (bool success : {true, false}) {
         pauseResult = success;

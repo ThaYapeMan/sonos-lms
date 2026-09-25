@@ -209,6 +209,8 @@ The app still shows Play. Its fresh GET receives a normal FLAC header and
 chunked audio when LMS resumes; an LMS resume without a GET reissues the same
 URL. Each connection's RelTime is anchored to its first PCM's track offset so
 LMS position continues across reconnects. The deferred `strm q` path is unchanged.
+LMS pause/play intent is retained while a transport call or stream restart is
+busy; the latest state is applied once ready, with a deferred-transport log.
 No environment overrides are needed. `SONOS_SQUEEZEBOX_PAUSE=pause` remains an
 explicit fallback to UPnP Pause and the previous same-URL resume behavior
 (including HTTP 503 for a speculative held GET). The pause switch is read and
