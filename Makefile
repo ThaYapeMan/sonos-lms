@@ -53,8 +53,9 @@ install:
 encoder-test: upnp/encoded_buffer.cpp upnp/encoded_buffer.h tests/encoder_test.cpp sbencoder.cpp sbencoder.h noson/noson/libnoson.a
 	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -DSBENCODER_TEST -o $@ tests/encoder_test.cpp sbencoder.cpp upnp/encoded_buffer.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
 
-test: position-test encoder-test resume-state-test streamer-test upnp-test own-control-test noson-golden
+test: sonos-lms position-test encoder-test resume-state-test streamer-test upnp-test own-control-test noson-golden
 	./upnp-test
+	python3 tests/list_rooms_test.py
 	python3 tests/upnp_mock_test.py
 	./position-test
 	python3 tests/send_error_test.py
@@ -107,3 +108,5 @@ noson-golden: tests/noson_golden.cpp noson/noson/libnoson.a
 
 
 upnp/encoded_buffer.o sbencoder.o: upnp/encoded_buffer.h
+
+sonos-lms.o: upnp/list_rooms.h

@@ -18,6 +18,9 @@ class SpeakerControl {
 public:
     virtual ~SpeakerControl() = default;
     virtual bool discover(const std::string& room, const std::string& seedIp = {}) = 0;
+    // Discover visible physical rooms, including non-coordinator group members.
+    // Does not select a playback target or issue transport commands.
+    virtual std::vector<std::string> discoverRooms(const std::string& seedIp = {}) = 0;
     virtual Speaker speaker() const = 0;
     virtual bool playStream(const std::string& url, const std::string& title,
                             const std::string& artUrl = {}) = 0;

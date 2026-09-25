@@ -13,6 +13,8 @@
 #include "upnp/noson_speaker_control.h"
 #include "upnp/own_speaker_control.h"
 #include "upnp/backend.h"
+#include "upnp/list_rooms.h"
+#include <iostream>
 #include "upnp/noson_stream_server.h"
 
 #include "resume_state.h"
@@ -757,9 +759,49 @@ static std::string readLmsServerFromConfig(const char* path = "/etc/sonos-lms/co
     return "";
 }
 
+// Keep stdout machine-readable even when the selected backend logs discovery.
+// Complete backend destruction while diagnostics are still redirected.
+static int listRoomsCommand(const std::string& ip, int debug)
+{
+    fflush(stdout);
+    const int outputFd = dup(STDOUT_FILENO);
+    if (outputFd < 0 || dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
+        if (outputFd >= 0) close(outputFd);
+        fprintf(stderr, "Cannot prepare room discovery output\n");
+        return 2;
+    }
+    std::ostringstream rooms;
+    int result = 2;
+    try {
+        if (upnp::backend() == upnp::Backend::Own) {
+            upnp::OwnSpeakerControl control([] { return 0u; });
+            result = upnp::listRooms(control, ip, rooms, std::cerr);
+        } else {
+            upnp::NosonStreamServer server(debug, nullptr);
+            upnp::NosonSpeakerControl control(server, nullptr);
+            result = upnp::listRooms(control, ip, rooms, std::cerr);
+        }
+    } catch (const std::exception& error) {
+        fprintf(stderr, "Room discovery failed: %s\n", error.what());
+    }
+    fflush(stdout);
+    if (dup2(outputFd, STDOUT_FILENO) < 0) {
+        close(outputFd);
+        fprintf(stderr, "Cannot restore room discovery output\n");
+        return 2;
+    }
+    close(outputFd);
+    if (!result) std::cout << rooms.str();
+    return result;
+}
+
 int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);
+    if (findFlag(argc, argv, "--list-rooms")) {
+        const auto ip = findOption(argc, argv, "--ip");
+        return listRoomsCommand(ip ? ip : "", findFlag(argc, argv, "--debug") ? 4 : 0);
+    }
     (void)pauseMode();
     const auto backend = upnp::backend();
     try {

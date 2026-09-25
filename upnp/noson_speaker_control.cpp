@@ -32,6 +32,12 @@ bool NosonSpeakerControl::discover(const std::string& room, const std::string& i
     }
     return !!impl->player;
 }
+std::vector<std::string> NosonSpeakerControl::discoverRooms(const std::string& ip) {
+    if (!(ip.empty() ? impl->system.Discover() : impl->system.Discover("http://" + ip + ":1400"))) return {};
+    std::vector<std::string> rooms;
+    for (const auto& entry : impl->system.GetZonePlayerList()) rooms.push_back(*entry.second);
+    return rooms;
+}
 Speaker NosonSpeakerControl::speaker() const { return impl->speaker; }
 bool NosonSpeakerControl::playStream(const std::string& url, const std::string& title, const std::string& art) { return impl->player->PlayStream(url, title, art); }
 bool NosonSpeakerControl::play() { return impl->player->Play(); }

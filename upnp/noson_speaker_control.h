@@ -8,6 +8,7 @@ public:
     NosonSpeakerControl(NosonStreamServer&, void (*event)(void*));
     ~NosonSpeakerControl() override;
     bool discover(const std::string&, const std::string& = {}) override;
+    std::vector<std::string> discoverRooms(const std::string& = {}) override;
     Speaker speaker() const override;
     bool playStream(const std::string&, const std::string&, const std::string& = {}) override;
     bool play() override;

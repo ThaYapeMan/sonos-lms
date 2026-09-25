@@ -74,6 +74,22 @@ bool OwnSpeakerControl::discover(const std::string& requestedRoom, const std::st
     printf("UPnP: failed to discover room '%s'\n", room.c_str());
     return false;
 }
+std::vector<std::string> OwnSpeakerControl::discoverRooms(const std::string& seed) {
+    std::vector<HttpUrl> locations;
+    if (!seed.empty()) {
+        HttpUrl url;
+        if (!parseHttpUrl("http://" + seed + ":" + std::to_string(speakerPort), url)) return {};
+        locations.push_back(url);
+    } else locations = discoverSsdp();
+    std::vector<std::string> rooms;
+    for (const auto& location : locations) {
+        const auto result = call("GetZoneGroupState", {}, location.host, "ZoneGroupTopology");
+        if (!result.ok) continue;
+        for (const auto& speaker : parseTopology(result.response.value("ZoneGroupState")))
+            rooms.push_back(speaker.name);
+    }
+    return rooms;
+}
 bool OwnSpeakerControl::playStream(const std::string& url, const std::string& title, const std::string& art) {
     if (url.find(':') == std::string::npos) return false;
     const auto metadata = streamDidl(url, title, art);
