@@ -211,11 +211,16 @@ lms_mode() { local r; r=$(cli_raw "$PLAYER mode ?"); printf '%s' "${r##* }"; }
 lms_time() { field "$(cli_raw "$PLAYER status - 1 tags:a")" time 2>/dev/null || echo 0; }
 
 # Wait up to $2 seconds until the speaker reports state $1.
+# Speaker states that count as "paused": the bridge may answer a pause with a
+# UPnP Stop (SONOS_SQUEEZEBOX_PAUSE=stop), so a paused speaker can be STOPPED.
+PAUSED_STATES='PAUSED_PLAYBACK|STOPPED'
+
+# wait_sonos <STATE or STATE|STATE...> <seconds>
 wait_sonos() {
     local want=$1 i st=''
     for (( i = 0; i < $2 * 2; i++ )); do
         st=$(sonos_state)
-        [[ -z $st || $st == "$want" ]] && return 0   # empty = cannot check
+        [[ -z $st || $st =~ ^($want)$ ]] && return 0   # empty = cannot check
         sleep 0.5
     done
     say "    speaker state is '$st', expected '$want'"
@@ -345,8 +350,8 @@ scenario_2() {
             setup_playing_a || { mark "S2 ABORTED: could not restart playback"; return 0; }
         fi
         prompt "S2.$i press PAUSE in the Sonos app"
-        if wait_sonos PAUSED_PLAYBACK 10; then
-            mark "S2.$i PAUSE OK: speaker PAUSED_PLAYBACK, lms_mode=$(lms_mode)"
+        if wait_sonos "$PAUSED_STATES" 10; then
+            mark "S2.$i PAUSE OK: speaker $(sonos_state), lms_mode=$(lms_mode)"
         else
             mark "S2.$i PAUSE NOT CONFIRMED: speaker=$(sonos_state), lms_mode=$(lms_mode)"
         fi
@@ -419,18 +424,18 @@ scenario_6() {
     mark "S6 long pause from the Sonos app (${LONG_PAUSE}s), then Sonos-app play"
     setup_playing_a || return 0
     prompt "S6 press PAUSE in the Sonos app"
-    if ! wait_sonos PAUSED_PLAYBACK 10 || [[ $(lms_mode) != pause ]]; then
+    if ! wait_sonos "$PAUSED_STATES" 10 || [[ $(lms_mode) != pause ]]; then
         mark "S6 ABORTED: pause not confirmed (speaker=$(sonos_state) lms_mode=$(lms_mode))"
         observe "S6 aborted: what does the speaker/app show?"
         return 0
     fi
-    mark "S6 pause confirmed: speaker PAUSED_PLAYBACK, LMS pause; countdown starts"
+    mark "S6 pause confirmed: speaker $(sonos_state), LMS pause; countdown starts"
     local left=$LONG_PAUSE st
     while (( left > 0 )); do
         printf '\r    paused, %4ds left ' "$left" >&2
         wait_s 10; (( left -= 10 ))
         st=$(sonos_state)
-        if [[ -n $st && $st != PAUSED_PLAYBACK ]] || [[ $(lms_mode) != pause ]]; then
+        if [[ -n $st && ! $st =~ ^($PAUSED_STATES)$ ]] || [[ $(lms_mode) != pause ]]; then
             printf '\n' >&2
             mark "S6 INVALID: pause interrupted after $(( LONG_PAUSE - left ))s (speaker=$st lms_mode=$(lms_mode))"
             observe "S6 invalid: did you press anything? what happened?"
