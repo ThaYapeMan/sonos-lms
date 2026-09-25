@@ -208,7 +208,13 @@ continued audio, and no dialog.
 The app still shows Play. Its fresh GET receives a normal FLAC header and
 chunked audio when LMS resumes; an LMS resume without a GET reissues the same
 URL. Each connection's RelTime is anchored to its first PCM's track offset so
-LMS position continues across reconnects. The deferred `strm q` path is unchanged.
+LMS position continues across reconnects. LMS stop (`strm q`) ends HTTP immediately
+and sends Stop after 400 ms unless superseded by `strm s`; track changes send no
+transport command. STOPPED itself never resumes LMS. Sonos-app Play sends one
+LMS `play` per resume attempt and feeds the fresh GET; if LMS starts a new stream,
+the waiting GET redirects to it. Explicit `pause=pause` retains deferred Pause.
+Physical scenario 7 is opt-in (`SCENARIOS=7 scripts/device-test.sh`) until verified;
+the default remains scenarios 1–6.
 LMS pause/play intent is retained while a transport call or stream restart is
 busy; the latest state is applied once ready, with a deferred-transport log.
 PlayStream failures retry up to three attempts, one second apart, then wait for

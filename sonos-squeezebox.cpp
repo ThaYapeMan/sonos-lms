@@ -246,7 +246,7 @@ extern "C" void sonos_lms_transport(char command)
         end_squeezebox_response();
         std::lock_guard<std::mutex> lock(stopMutex);
         deferredStop.schedule(StopDebounce::Clock::now());
-        printf("strm q: deferring Pause for 400 ms\n");
+        printf("strm q: deferring %s for 400 ms\n", pauseMode() == PauseMode::Stop ? "Stop" : "Pause");
         return; // receive the next strm s without waiting on UPnP
     }
     dispatchTransportIntent();
@@ -275,8 +275,15 @@ static void dispatchDeferredStop()
         if (!deferredStop.takeDue(StopDebounce::Clock::now())) return;
     }
     if (!ourStreamStarted.load() || stream_just_restarted() || !lmsPaused.load()) return;
-    printf("strm q -> UPnP Pause (400 ms elapsed)\n");
-    if (!gPlayer->Pause()) printf("strm q: device transport command failed\n");
+    const bool stopForPause = pauseMode() == PauseMode::Stop;
+    if (stopForPause) {
+        std::lock_guard<std::mutex> lock(resumeMutex);
+        resumeState.stopForPause(streamId.load());
+    }
+    printf(stopForPause ? "strm q -> UPnP Stop (400 ms elapsed, pause=stop)\n"
+                        : "strm q -> UPnP Pause (400 ms elapsed)\n");
+    if (!(stopForPause ? gPlayer->Stop() : gPlayer->Pause()))
+        printf("strm q: device transport command failed\n");
     end_squeezebox_response();
 }
 
@@ -516,7 +523,8 @@ static void ObserveDeviceTransport(const std::string& state)
 
 // Called while a current-ID GET waits for PCM. A probe/reconnect is not itself
 // a resume: require an observed pause (PAUSED or Stop-for-pause STOPPED)
-// followed by PLAYING/TRANSITIONING, and strm p without a subsequent strm u. Poll cached device state because GET and event callbacks
+// followed by PLAYING/TRANSITIONING, and an LMS pause or completed q-Stop without a subsequent u/s/q.
+// Poll cached device state because GET and event callbacks
 // can arrive in either order. Do not hold transportMutex across LMS CLI I/O:
 // the resulting strm u feeds the held GET without another device command.
 void ResumeSqueezeBox(unsigned requested)

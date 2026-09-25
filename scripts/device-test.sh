@@ -468,6 +468,21 @@ scenario_6() {
     observe "S6: error dialog in the app (e), silent (s), or fine (n)?"
 }
 
+# Opt in with SCENARIOS=7 until physically verified.
+scenario_7() {
+    mark "S7 LMS stop, then Sonos-app play"
+    setup_playing_a || return 0
+    mark "S7 LMS stop"
+    lms stop; wait_s 5
+    wait_sonos STOPPED 5
+    mark "S7 after stop: speaker=$(sonos_state) (expected STOPPED) lms_mode=$(lms_mode) (expected stop)"
+    prompt "S7 press PLAY in the Sonos app"
+    wait_s 15; snapshot
+    wait_sonos PLAYING 5
+    mark "S7 after PLAY: speaker=$(sonos_state) lms_mode=$(lms_mode); $(now_playing)"
+    observe "S7: plays (p), silent (s), error dialog (e)?"
+}
+
 # ------------------------------------------------------------------ main ---
 
 [[ $EUID -eq 0 ]] || fail "run as root (tcpdump and journal access)"

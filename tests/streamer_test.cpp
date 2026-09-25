@@ -23,7 +23,7 @@ static std::mutex stateMutex;
 static ResumeState state;
 static std::string deviceState = "PLAYING";
 static unsigned resumeDelayMs = 0;
-static bool pendingResume = false;
+static bool pendingResume = false, restartOnResume = false;
 static std::chrono::steady_clock::time_point resumeAt;
 extern "C" unsigned get_lms_stream_serial() { return generation.load(); }
 extern "C" unsigned get_squeezebox_stream_id() { return generation.load(); }
@@ -48,6 +48,11 @@ void ResumeSqueezeBox(unsigned id) {
         resumeAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(resumeDelayMs);
     }
     if (pendingResume && std::chrono::steady_clock::now() >= resumeAt) {
+        if (restartOnResume) {
+            state.command('s'); ++generation; state.streamStarted();
+            pendingResume = false; paused = false;
+            return;
+        }
         // Simulate LMS receiving CLI play and answering with strm u, not s.
         assert(state.command('u', squeezebox_response_open(id)) == ResumeState::Unpause::SameURL);
         if (pauseMode() == PauseMode::Pause) invalidate_squeezebox_held_get(id);
@@ -207,13 +212,14 @@ static void deviceReconnect(SBStreamer& broker, unsigned id, int first) {
     assert(sameURLRequests == requestsBefore + 1 && resumeCommands == commandsBefore + 1);
 }
 
-static void stopPauseStreamTest() {
+static void stopPauseStreamTest(char command) {
+    state = ResumeState{}; resumeCommands = 0;
     SBStreamer broker;
     Socket initial(1);
     connection(broker, initial, 1900);
     playable(initial, 1900);
     state.command('s'); state.observe("PLAYING");
-    state.command('p'); state.stopForPause(1); state.observe("STOPPED");
+    state.command(command); state.stopForPause(1); state.observe("STOPPED");
     paused = true; deviceState = "STOPPED";
     Socket resume(1, false, true);
     auto get = std::async(std::launch::async, [&] { serve(broker, resume); });
@@ -234,6 +240,23 @@ static void stopPauseStreamTest() {
     playable(resume, 1950);
     assert(resume.headers.find("Transfer-Encoding: chunked") != std::string::npos);
     puts("PASS: stop-for-pause fresh resume GET has normal FLAC header and chunked audio after STOPPED");
+}
+
+static void stoppedRestartTest() {
+    SBStreamer broker;
+    state = ResumeState{}; resumeCommands = 0;
+    state.command('q'); state.stopForPause(1); state.observe("STOPPED");
+    paused = true; deviceState = "TRANSITIONING"; restartOnResume = true;
+    Socket old(1);
+    serve(broker, old);
+    assert(resumeCommands == 1 && generation == 2);
+    assert(old.headers.find("302 Found") != std::string::npos);
+    assert(old.headers.find("Location: " + SqueezeBoxURL(2)) != std::string::npos);
+    assert(old.body.empty());
+    Socket current(2);
+    connection(broker, current, 1960);
+    playable(current, 1960);
+    puts("PASS: LMS restart after q-Stop redirects held GET to fresh playable generation without 503");
 }
 
 int main(int argc, char** argv) {
@@ -260,7 +283,7 @@ int main(int argc, char** argv) {
         puts("PASS: real streamer/encoder anchors the first PCM of a same-stream GET and resets for a new stream");
         return 0;
     }
-    if (pauseMode() == PauseMode::Stop) { stopPauseStreamTest(); return 0; }
+    if (pauseMode() == PauseMode::Stop) { stopPauseStreamTest('p'); stopPauseStreamTest('q'); stoppedRestartTest(); return 0; }
 
     setvbuf(stdout, nullptr, _IOLBF, 0);
     SBStreamer broker;

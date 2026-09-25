@@ -157,6 +157,7 @@ static void paused(const char* status) {
 int main() {
     transportIntentCases();
     retryCases();
+    deferredStopCases();
     if (pauseMode() == PauseMode::Stop) { stopPauseCases(); return 0; }
     // Isolate logging from device I/O, and check heartbeats between every
     // supported transport command rather than only at startup.

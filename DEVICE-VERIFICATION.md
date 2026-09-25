@@ -40,12 +40,13 @@ by connection-based PCM anchoring; physically recheck position as described belo
    allowing for device startup and buffered-audio latency.
 3. **(c) Seek by dragging the LMS bar — defect H acceptance.** During playback,
    drag forward and then backward within the same track. Each q/s burst should
-   log `strm q: deferring Pause for 400 ms` followed by
+   log `strm q: deferring Stop for 400 ms` followed by
    `strm q: superseded by strm s, no Pause`. Expect exactly one `Creating new
    stream (N)` per seek and probe/real GETs for it. Require playback at the new
    position without an intervening `UPnP Pause` or device stop. Separately issue
    a genuine LMS stop with no following s: expect
-   `strm q -> UPnP Pause (400 ms elapsed)` after approximately 400 ms. The HTTP
+   `strm q -> UPnP Stop (400 ms elapsed, pause=stop)` after approximately 400 ms.
+   With explicit `SONOS_SQUEEZEBOX_PAUSE=pause`, expect UPnP Pause instead. The HTTP
    response ends immediately on q in both cases.
 4. **(d) Sonos-app pause/play — defect J acceptance.** Test an immediate Play
    and a full 30-second pause. Expect `Device-initiated pause -> LMS pause`,
@@ -128,3 +129,10 @@ held GET closes with HTTP 503 within 300 ms before a fresh same-ID GET carries
 audio. Wrong-stream invalidation is ignored and active audio is preserved.
 Repeat physical checks after changes; local tests cannot establish audible
 continuity, app dialogs, or device timing.
+
+Opt-in **S7: LMS stop, then Sonos-app Play** (`SCENARIOS=7 scripts/device-test.sh`):
+expect STOPPED and LMS mode stop after five seconds, with no automatic restart.
+Press Play in the app: expect one LMS `play`, fresh FLAC audio on the held GET
+(or a redirect to the new stream if LMS restarts the track), no 503, and no app
+dialog. Record speaker state, LMS mode and now-playing after 15 seconds. S7 is
+not yet physically verified and is excluded from the default scenarios 1–6.

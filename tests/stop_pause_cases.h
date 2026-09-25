@@ -45,12 +45,6 @@ static void stopPauseCases() {
         assert(!resumeState.stoppedForPause(6));
         assert(stopCalls == 1);
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(410));
-    // q retains its existing deferred Pause operation.
-    responseEnds = 1;
-    dispatchDeferredStop();
-    assert(pauseCalls == 1 && stopCalls == 1);
-    puts("PASS: new stream/s/q clear stopped-for-pause; q still defers UPnP Pause");
     resumeState = ResumeState{};
     resumeState.command('s'); resumeState.observe("PLAYING");
     cliPauses = 0;
@@ -60,4 +54,48 @@ static void stopPauseCases() {
     sonos_lms_transport('p');
     assert(stopCalls == 1 && responseEnds == 1);
     puts("PASS: device pause relays LMS pause, whose strm p sends Stop");
+}
+
+static void deferredStopCases() {
+    auto setup = [] {
+        resumeState = ResumeState{};
+        deferredStop = StopDebounce{};
+        responseOpen = true; responseEnded = false;
+        cliPlays = cliPauses = pauseCalls = stopCalls = responseEnds = 0;
+        streamPlays = transportPlays = heldGetInvalidations = 0;
+        callOrder.clear();
+        resumeState.command('s'); resumeState.observe("PLAYING");
+        sonos_lms_transport('q');
+        dispatchDeferredStop();
+        assert(stopCalls == 0 && pauseCalls == 0 && responseEnds == 1);
+    };
+    setup();
+    sonos_lms_transport('s');
+    std::this_thread::sleep_for(std::chrono::milliseconds(410));
+    dispatchDeferredStop();
+    assert(stopCalls == 0 && pauseCalls == 0);
+    puts("PASS: q then s cancels the deferred transport command");
+    for (const char* next : {"TRANSITIONING", "PLAYING"}) {
+        setup();
+        std::this_thread::sleep_for(std::chrono::milliseconds(410));
+        dispatchDeferredStop(); dispatchDeferredStop();
+        if (pauseMode() == PauseMode::Pause) {
+            assert(pauseCalls == 1 && stopCalls == 0);
+            assert(!resumeState.stoppedForPause(6));
+            continue;
+        }
+        assert(stopCalls == 1 && pauseCalls == 0 && resumeState.stoppedForPause(6));
+        player.property = {"STOPPED", "OK"};
+        SONOS::Status status;
+        refreshStatus(status); refreshStatus(status);
+        assert(cliPlays == 0 && cliPauses == 0 && streamPlays == 0 && transportPlays == 0);
+        responseOpen = true; // fresh GET
+        player.property.TransportState = next;
+        ResumeSqueezeBox(6); ResumeSqueezeBox(6); refreshStatus(status);
+        assert(cliPlays == 1 && cliPauses == 0);
+        sonos_lms_transport('u');
+        assert(responseOpen && !lmsPaused && !responseEnded);
+        assert(streamPlays == 0 && transportPlays == 0 && heldGetInvalidations == 0);
+    }
+    puts("PASS: q after 400 ms uses configured Stop/Pause; q-Stop ignores STOPPED and fresh GET sends LMS play once");
 }

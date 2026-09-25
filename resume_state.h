@@ -19,7 +19,7 @@ public:
             action = newStreamPending ? Unpause::NewStream
                 : (responseOpen && !requested) ? Unpause::FeedHeldGet
                 : Unpause::SameURL;
-            newStreamPending = pausedBeforeStop = false;
+            newStreamPending = pausedBeforeStop = stoppedResume = false;
         } else if (command == 's') {
             newStreamPending = newStreamPending || paused || pausedBeforeStop;
             pausedBeforeStop = false;
@@ -68,7 +68,7 @@ public:
     }
 
     bool takeResume(unsigned requestedId, unsigned currentId, Clock::time_point now = Clock::now()) {
-        if (requestedId != currentId || !paused || !sawPause || !transitioning || requested)
+        if (requestedId != currentId || (!paused && !stoppedResume) || !sawPause || !transitioning || requested)
             return false;
         requested = true;
         resumeDeadline = now + std::chrono::seconds(5);
@@ -79,6 +79,7 @@ public:
 
     void stopForPause(unsigned stream) {
         stoppedPauseId = stream;
+        stoppedResume = true;
         sawStoppedPause = sawPause = transitioning = requested = false;
     }
     bool stoppedForPause(unsigned stream) const { return stream && stoppedPauseId == stream; }
@@ -95,9 +96,11 @@ private:
         if (stoppedPauseId || sawStoppedPause)
             sawPause = transitioning = requested = false;
         stoppedPauseId = 0;
+        stoppedResume = false;
         sawStoppedPause = false;
     }
     unsigned stoppedPauseId = 0;
+    bool stoppedResume = false; // completed Stop from p or q permits device resume
     bool sawStoppedPause = false;
     bool newStreamPending = false;
     bool pausedBeforeStop = false;

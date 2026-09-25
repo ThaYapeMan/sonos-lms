@@ -370,7 +370,11 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
     bool streamReady = r >= 4 && memcmp(buf, "fLaC", 4) == 0;
     const std::string streamingHeaders = "HTTP/1.1 200 OK\r\nServer: libnoson/" LIBVERSION "\r\nConnection: close\r\n"
         "Content-Type: audio/flac\r\nTransfer-Encoding: chunked\r\n\r\n";
-    if (!streamReady) {
+    if (!streamReady && waitForResumeAudio && (unsigned)stream != get_squeezebox_stream_id()) {
+        // LMS play after stop can start a new delivery generation. The held
+        // GET follows that URL instead of reporting an audio failure.
+        redirect();
+    } else if (!streamReady) {
         printf("stream %d: no audio before timeout or connection replaced\n", stream);
         std::string error = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         handle->broker->ReplyData(error.c_str(), error.size());
