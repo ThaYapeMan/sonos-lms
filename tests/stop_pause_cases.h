@@ -19,7 +19,7 @@ static void stopPauseCases() {
     for (const char* state : {"TRANSITIONING", "PLAYING"}) {
         pause();
         responseOpen = true; // fresh device GET, waiting for LMS PCM
-        player.property.TransportState = state;
+        player.property.state = state;
         ResumeSqueezeBox(6); ResumeSqueezeBox(6);
         assert(cliPlays == 1);
         sonos_lms_transport('u');
@@ -86,11 +86,11 @@ static void deferredStopCases() {
         }
         assert(stopCalls == 1 && pauseCalls == 0 && resumeState.stoppedForPause(6));
         player.property = {"STOPPED", "OK"};
-        SONOS::Status status;
+        bridge::Status status;
         refreshStatus(status); refreshStatus(status);
         assert(cliPlays == 0 && cliPauses == 0 && streamPlays == 0 && transportPlays == 0);
         responseOpen = true; // fresh GET
-        player.property.TransportState = next;
+        player.property.state = next;
         ResumeSqueezeBox(6); ResumeSqueezeBox(6); refreshStatus(status);
         assert(cliPlays == 1 && cliPauses == 0);
         sonos_lms_transport('u');

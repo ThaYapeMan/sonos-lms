@@ -31,12 +31,12 @@ static std::atomic<unsigned> streamPlays{0};
 static std::atomic<unsigned> transportPlays{0};
 static unsigned heldGetInvalidations = 0;
 static std::vector<std::string> callOrder;
-struct Transport { std::string TransportState, TransportStatus; };
+struct Transport { std::string state, status; };
 struct FakePlayer {
     Transport property;
-    Transport GetTransportProperty() { return property; }
-    std::string GetControllerUri() { return "http://bridge"; }
-    bool PlayStream(const std::string& url, const std::string&, const std::string&) {
+    Transport transportInfo() { return property; }
+    std::string controllerUri() { return "http://bridge"; }
+    bool playStream(const std::string& url, const std::string&, const std::string&) {
         assert(url == "http://bridge/music/squeezebox.flac?session=" + streamSessionToken() + "&stream=6");
         callOrder.push_back("PlayStream");
         if (!testingStreamStart) {
@@ -48,19 +48,19 @@ struct FakePlayer {
         if (playStreamFailures) { --playStreamFailures; return false; }
         return true;
     }
-    bool Stop() {
+    bool stop() {
         assert(!responseOpen && responseEnded && responseEnds == 1);
         assert(resumeState.stoppedForPause(6));
         ++stopCalls;
         return true;
     }
-    bool Pause() {
+    bool pause() {
         // Inspect state inside the blocking call, before its result is known.
         assert(!responseOpen && responseEnded && responseEnds == 1);
         ++pauseCalls;
         return pauseResult;
     }
-    bool Play() {
+    bool play() {
         ++transportPlays;
         return true;
     }
@@ -93,23 +93,18 @@ static bool sendLmsCommand(int, int, const char* command) {
 // The real PlaySqueezeBoxLocked runs too; only its network/data sources are fake.
 #define SBSTREAMER_CNAME "squeezebox"
 struct Resource { std::string iconUri = "/icon.png", uri = "/music/squeezebox.flac"; };
-namespace SONOS { struct RequestBroker { using ResourcePtr = Resource*; }; }
-struct FakeBroker {
-    Resource resource;
-    Resource* GetResource(const char*) { return &resource; }
-};
-struct FakeSystem {
-    FakeBroker broker;
-    FakeBroker* GetRequestBroker(const char*) { return &broker; }
-} systemStub;
-static FakeSystem* gSonos = &systemStub;
+struct FakeServer {
+    Resource value;
+    Resource resource(const char*) { return value; }
+} serverStub;
+static FakeServer* gStreamServer = &serverStub;
 struct TrackInfo { std::string title, artworkUrl; };
 static TrackInfo fetchLmsTrackInfo(int, int) { return {"Test track", "http://bridge/art"}; }
 static void reset_sonos_position(unsigned) {}
-namespace SONOS {
+namespace bridge {
 struct Status {
     void update() {}
-    std::string getTransportState() { return player.property.TransportState; }
+    std::string getTransportState() { return player.property.state; }
     bool changed() { return false; }
     void print() {}
 };
@@ -145,7 +140,7 @@ static void paused(const char* status) {
     resumeState.observe("PLAYING");
     sonos_lms_transport('p');
     player.property = {"PAUSED_PLAYBACK", status};
-    SONOS::Status snapshot;
+    bridge::Status snapshot;
     refreshStatus(snapshot);
     assert(lmsPaused && !responseOpen && responseEnded && cliPlays == 0);
     assert(pauseCalls == 1 && responseEnds == 1);
@@ -158,9 +153,9 @@ static void paused(const char* status) {
 
 int main() {
     assert(SqueezeBoxURL(6) == "http://bridge/music/squeezebox.flac?session=" + streamSessionToken() + "&stream=6");
-    systemStub.broker.resource.uri += "?existing=1";
+    serverStub.value.uri += "?existing=1";
     assert(SqueezeBoxURL(7) == "http://bridge/music/squeezebox.flac?existing=1&session=" + streamSessionToken() + "&stream=7");
-    systemStub.broker.resource.uri = "/music/squeezebox.flac";
+    serverStub.value.uri = "/music/squeezebox.flac";
     puts("PASS: production SqueezeBoxURL includes the process token and preserves existing query parameters");
     transportIntentCases();
     retryCases();
@@ -189,10 +184,10 @@ int main() {
             success ? "success" : "failure");
     }
     pauseResult = true;
-    SONOS::Status snapshot;
+    bridge::Status snapshot;
     for (const char* status : {"ERROR_NO_RESOURCE", "ERROR_LOST_CONNECTION", "OK"}) {
         paused(status);
-        player.property.TransportState = "TRANSITIONING";
+        player.property.state = "TRANSITIONING";
         refreshStatus(snapshot);
         refreshStatus(snapshot); // repeated event must not send a second play
         assert(cliPlays == 1 && lmsPaused && !responseOpen);
@@ -207,7 +202,7 @@ int main() {
 
     paused("ERROR_NO_RESOURCE");
     responseOpen = true; // a held HTTP worker now owns the resume
-    player.property.TransportState = "TRANSITIONING";
+    player.property.state = "TRANSITIONING";
     refreshStatus(snapshot);
     assert(cliPlays == 0);
     ResumeSqueezeBox(6); // production HTTP callback
@@ -219,7 +214,7 @@ int main() {
     puts("PASS: open GET does not stop a device resume from reissuing PlayStream");
 
     paused("ERROR_NO_RESOURCE");
-    player.property.TransportState = "TRANSITIONING";
+    player.property.state = "TRANSITIONING";
     refreshStatus(snapshot);
     assert(cliPlays == 1);
     responseOpen = true; // GET arrives before the asynchronous LMS strm u
@@ -229,7 +224,7 @@ int main() {
 
     paused("ERROR_NO_RESOURCE");
     responseOpen = true;
-    player.property.TransportState = "TRANSITIONING";
+    player.property.state = "TRANSITIONING";
     ResumeSqueezeBox(6);
     assert(cliPlays == 1);
     responseOpen = false; // client closes before the asynchronous LMS strm u

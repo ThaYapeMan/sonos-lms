@@ -13,8 +13,7 @@
 #ifndef FLACENCODER_H
 #define FLACENCODER_H
 
-#include "audioencoder.h"
-#include "local_config.h"
+#include "upnp/encoded_buffer.h"
 
 #include <atomic>
 #include <functional>
@@ -23,10 +22,8 @@
 #include <FLAC++/encoder.h>
 #include <FLAC++/metadata.h>
 
-namespace NSROOT {
+namespace bridge {
 
-class RingBuffer;
-class RingBufferPacket;
 
 // Bridges squeezelite's decoded PCM (pushed via write()) to the HTTP
 // streamer's FLAC output (pulled via read()), pacing writes against actual
@@ -107,8 +104,8 @@ private:
     unsigned m_streamId;
     FLAC__int32* m_interleaveBuf;
 
-    RingBuffer* m_encodedRing;
-    RingBufferPacket* m_pendingPacket;
+    upnp::EncodedBuffer* m_encodedRing;
+    upnp::EncodedBuffer::Packet* m_pendingPacket;
     int m_pendingPacketConsumed;
 
     class WriteBridge : public FLAC::Encoder::Stream {
@@ -127,5 +124,5 @@ private:
     WriteBridge* m_flac;
 };
 
-}  // namespace NSROOT
+}  // namespace bridge
 #endif  // FLACENCODER_H

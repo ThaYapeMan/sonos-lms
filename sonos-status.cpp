@@ -15,7 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-using namespace NSROOT;
+using namespace bridge;
 
 namespace {
 constexpr char kNoPosition[] = "-:--:--";
@@ -33,12 +33,12 @@ bool Status::Snapshot::operator==(const Snapshot& other) const
         && volume == other.volume;
 }
 
-Status::Status(PlayerPtr player)
+Status::Status(std::shared_ptr<upnp::SpeakerControl> player)
     : m_player(player)
 {
     if (m_player) {
-        m_zoneUuid = m_player->GetZone()->GetCoordinator()->GetUUID();
-        m_zoneName = m_player->GetZone()->GetZoneName();
+        m_zoneUuid = m_player->speaker().uuid;
+        m_zoneName = m_player->speaker().name;
     }
     m_current.relativeTime = kNoPosition;
     m_current.trackDuration = kNoPosition;
@@ -50,25 +50,15 @@ Status::Snapshot Status::poll() const
     s.relativeTime = kNoPosition;
     s.trackDuration = kNoPosition;
 
-    if (!m_player || m_player->TransportPropertyEmpty())
-        return s;
-
-    if (!m_player->GetVolume(m_zoneUuid, &s.volume))
-        s.volume = 0;
-
-    SONOS::ElementList position;
-    if (m_player->GetPositionInfo(position))
-        s.relativeTime = position.GetValue("RelTime");
-
-    SONOS::AVTProperty transport = m_player->GetTransportProperty();
-    if (transport.CurrentTrackMetaData) {
-        s.title = transport.CurrentTrackMetaData->GetValue("dc:title");
-        s.album = transport.CurrentTrackMetaData->GetValue("upnp:album");
-        s.artist = transport.CurrentTrackMetaData->GetValue("dc:creator");
-    }
-    s.transportStatus = transport.TransportStatus;
-    s.transportState = transport.TransportState;
-    s.trackDuration = transport.CurrentTrackDuration;
+    if (!m_player) return s;
+    const auto transport = m_player->transportInfo();
+    if (!transport.available) return s;
+    s.volume = m_player->displayVolume();
+    uint32_t ms;
+    m_player->positionInfo(ms, &s.relativeTime);
+    s.title = transport.title; s.album = transport.album; s.artist = transport.artist;
+    s.transportStatus = transport.status; s.transportState = transport.state;
+    s.trackDuration = transport.duration;
     return s;
 }
 

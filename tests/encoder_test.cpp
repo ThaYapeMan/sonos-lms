@@ -19,7 +19,7 @@ extern "C" uint64_t get_sb_time_ms()
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-namespace SONOS {
+namespace bridge {
 struct EncoderTestAccess {
     static void seed(SBEncoder& encoder, uint64_t bytes) {
         encoder.m_pcmBytesAccepted = bytes;
@@ -30,22 +30,22 @@ struct EncoderTestAccess {
 }
 
 static void counterAndShutdownTests() {
-    SONOS::SBEncoder encoder(1);
+    bridge::SBEncoder encoder(1);
     assert(encoder.open());
     char pcm[4] = {};
     const uint64_t boundary = uint64_t(1) << 32;
-    SONOS::EncoderTestAccess::seed(encoder, boundary - 4);
+    bridge::EncoderTestAccess::seed(encoder, boundary - 4);
     fakeClock = boundary / 4 * 1000 / 44100 + 1;
     unsigned anchors = 0;
     auto anchor = [&] { ++anchors; };
     assert(encoder.write(pcm, 4, 10, anchor) == 4);
-    assert(SONOS::EncoderTestAccess::bytes(encoder) == boundary);
+    assert(bridge::EncoderTestAccess::bytes(encoder) == boundary);
     assert(encoder.write(pcm, 4, 10, anchor) == 4);
-    assert(SONOS::EncoderTestAccess::bytes(encoder) == boundary + 4 && anchors == 0);
+    assert(bridge::EncoderTestAccess::bytes(encoder) == boundary + 4 && anchors == 0);
     // Pacing time must also remain 64-bit, beyond the old 49-day ms wrap.
     const uint64_t bytes = (boundary + 2000) * 44100 / 1000 * 4;
     const uint64_t elapsed = bytes / 4 * 1000 / 44100;
-    SONOS::EncoderTestAccess::seed(encoder, bytes);
+    bridge::EncoderTestAccess::seed(encoder, bytes);
     fakeClock = elapsed - 1000 + 1;
     assert(encoder.write(pcm, 4, 5, anchor) == 0); // still a second ahead
     fakeClock = elapsed + 1;
@@ -53,7 +53,7 @@ static void counterAndShutdownTests() {
     fakeClock = 0;
     std::cout << "PASS: PCM counter crosses 2^32 without re-anchoring; pacing remains 64-bit beyond 49 days\n";
 
-    SONOS::SBEncoder waiting(1);
+    bridge::SBEncoder waiting(1);
     assert(waiting.open());
     paused = true;
     std::atomic<bool> stopping(false);
@@ -71,7 +71,7 @@ static void counterAndShutdownTests() {
 int main()
 {
     counterAndShutdownTests();
-    SONOS::SBEncoder old(1);
+    bridge::SBEncoder old(1);
     char data[16384];
     assert(old.open());
     assert(old.read(data, 4, 10) == 4);
@@ -94,7 +94,7 @@ int main()
     // from another thread. The new generation starts with its own FLAC marker.
     generation = 2;
     assert(old.read(data, sizeof(data), 5) == 0);
-    SONOS::SBEncoder fresh(2);
+    bridge::SBEncoder fresh(2);
     assert(fresh.open());
     assert(fresh.read(data, 4, 10) == 4);
     assert(std::memcmp(data, "fLaC", 4) == 0);
@@ -111,7 +111,7 @@ int main()
     fresh.cancel();
     assert(waitingWriter.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
     assert(waitingWriter.get() == 0);
-    SONOS::SBEncoder replacement(2);
+    bridge::SBEncoder replacement(2);
     assert(replacement.open());
     assert(replacement.read(data, 4, 10, false) == 4);
     assert(std::memcmp(data, "fLaC", 4) == 0);

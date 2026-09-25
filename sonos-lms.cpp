@@ -10,12 +10,8 @@
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 
-#include <contentdirectory.h>
-#include <didlparser.h>
-#include <filestreamer.h>
-#include <imageservice.h>
-#include <sonosplayer.h>
-#include <sonossystem.h>
+#include "upnp/noson_speaker_control.h"
+#include "upnp/noson_stream_server.h"
 
 #include "resume_state.h"
 #include "transport_intent.h"
@@ -58,8 +54,8 @@ const char* findFlag(int argc, char** argv, const std::string& flag);
 const char* findOption(int argc, char** argv, const std::string& option);
 }  // namespace
 
-SONOS::System* gSonos = 0;
-SONOS::PlayerPtr gPlayer;
+std::unique_ptr<upnp::StreamServer> gStreamServer;
+std::shared_ptr<upnp::SpeakerControl> gPlayer;
 uint8_t gMac[6];
 std::atomic<bool> gEvent{true};
 static std::string gServer;
@@ -138,7 +134,7 @@ static void dispatchTransportIntent()
     {
         bool ended = !pause && squeezebox_response_ended(streamId.load());
         bool missing = unpause == ResumeState::Unpause::SameURL;
-        bool error = !pause && gPlayer->GetTransportProperty().TransportStatus == "ERROR_LOST_CONNECTION";
+        bool error = !pause && gPlayer->transportInfo().status == "ERROR_LOST_CONNECTION";
         if (ended)
             printf("strm u after ended response -> PlayStream(same URL)\n");
         else if (missing)
@@ -164,7 +160,7 @@ static void dispatchTransportIntent()
                 std::lock_guard<std::mutex> stateLock(resumeMutex);
                 resumeState.stopForPause(streamId.load());
             }
-            ok = pause ? (stopForPause ? gPlayer->Stop() : gPlayer->Pause()) : gPlayer->Play();
+            ok = pause ? (stopForPause ? gPlayer->stop() : gPlayer->pause()) : gPlayer->play();
             auto upnpMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - upnpStart).count();
             printf("gPlayer->%s took %lldms\n", pause ? (stopForPause ? "Stop" : "Pause") : "Play", (long long)upnpMs);
@@ -285,7 +281,7 @@ static void dispatchDeferredStop()
     }
     printf(stopForPause ? "strm q -> UPnP Stop (400 ms elapsed, pause=stop)\n"
                         : "strm q -> UPnP Pause (400 ms elapsed)\n");
-    if (!(stopForPause ? gPlayer->Stop() : gPlayer->Pause()))
+    if (!(stopForPause ? gPlayer->stop() : gPlayer->pause()))
         printf("strm q: device transport command failed\n");
     flush_squeezebox_response();
 }
@@ -498,11 +494,10 @@ static void runSqueezeliteClient(const char* server, std::string playerName)
 // Shared by SetAVTransportURI and HTTP redirects, including resource parameters.
 std::string SqueezeBoxURL(unsigned stream_id)
 {
-    auto rb = gSonos->GetRequestBroker(SBSTREAMER_CNAME);
-    auto res = rb ? rb->GetResource(SBSTREAMER_CNAME) : SONOS::RequestBroker::ResourcePtr();
-    if (!res) return "";
-    return gPlayer->GetControllerUri() + res->uri
-        + (res->uri.find('?') == std::string::npos ? "?" : "&")
+    const auto res = gStreamServer->resource(SBSTREAMER_CNAME);
+    if (res.uri.empty()) return "";
+    return gPlayer->controllerUri() + res.uri
+        + (res.uri.find('?') == std::string::npos ? "?" : "&")
         + "session=" + streamSessionToken() + "&stream=" + std::to_string(stream_id);
 }
 
@@ -533,7 +528,7 @@ static void ObserveDeviceTransport(const std::string& state)
 void ResumeSqueezeBox(unsigned requested)
 {
     if (!ourStreamStarted.load() || stream_just_restarted()) return;
-    ObserveDeviceTransport(gPlayer->GetTransportProperty().TransportState);
+    ObserveDeviceTransport(gPlayer->transportInfo().state);
     bool resume;
     {
         std::lock_guard<std::mutex> lock(resumeMutex);
@@ -557,15 +552,14 @@ static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition)
     std::string streamURL = SqueezeBoxURL(stream_id);
     bool ok = false;
     if (!streamURL.empty()) {
-        auto rb = gSonos->GetRequestBroker(SBSTREAMER_CNAME);
-        auto res = rb->GetResource(SBSTREAMER_CNAME);
+        const auto res = gStreamServer->resource(SBSTREAMER_CNAME);
         TrackInfo track = fetchLmsTrackInfo(gServer, gMac);
         std::string title = track.title.empty() ? "Squeezebox" : track.title;
         std::string artUrl = track.artworkUrl.empty()
-            ? gPlayer->GetControllerUri() + res->iconUri : track.artworkUrl;
+            ? gPlayer->controllerUri() + res.iconUri : track.artworkUrl;
         printf("PlaySqueezeBox: title='%s' art='%s'\n", title.c_str(), artUrl.c_str());
         if (resetPosition) reset_sonos_position(stream_id);
-        ok = gPlayer->PlayStream(streamURL, title, artUrl);
+        ok = gPlayer->playStream(streamURL, title, artUrl);
         if (ok) {
             ourStreamStarted.store(true);
             acknowledge_squeezebox_resume(stream_id);
@@ -605,85 +599,7 @@ static void dispatchStreamStart()
     }
 }
 
-// Parse UPnP RelTime "H:MM:SS" -> milliseconds; returns 0 on parse failure.
-static uint32_t parse_reltime_ms(const std::string& rt)
-{
-    unsigned h = 0, m = 0, s = 0;
-    if (sscanf(rt.c_str(), "%u:%u:%u", &h, &m, &s) == 3)
-        return (h * 3600u + m * 60u + s) * 1000u;
-    return 0;
-}
-
 namespace {
-
-void printDiscoveredPlayers(const SONOS::ZonePlayerList& players)
-{
-    printf("+----------------------------------------------------------------------- devices / players ---+\n");
-    printf("| %-35s | %-24s | %-18s | %5s |\n", "player name", "uuid", "host", "port");
-    printf("+---------------------------------------------------------------------------------------------+\n");
-    for (const auto& entry : players) {
-        printf("| %-35s | %-24s | %-18s | %5d |\n",
-            entry.first.c_str(), entry.second->GetUUID().c_str(),
-            entry.second->GetHost().c_str(), entry.second->GetPort());
-    }
-    printf("+---------------------------------------------------------------------------------------------+\n\n");
-}
-
-void printDiscoveredZones(const SONOS::ZoneList& zones)
-{
-    printf("+--------------------------------------------------------------------------- zones / rooms ---+\n");
-    printf("| %-35s | %-53s |\n", "room name", "coordinating player");
-    printf("+---------------------------------------------------------------------------------------------+\n");
-    for (const auto& entry : zones) {
-        printf("| %-35s | %-53s |\n",
-            entry.second->GetZoneName().c_str(), entry.second->GetCoordinator()->c_str());
-    }
-    printf("+---------------------------------------------------------------------------------------------+\n\n");
-}
-
-// Finds the zone matching --room and connects a controller to its coordinator.
-// Returns false (with a message already printed) on any failure.
-bool connectToRoom(const std::string& roomName, const SONOS::ZoneList& zones)
-{
-    printf("Connecting to room %s ... ", roomName.c_str());
-    for (const auto& entry : zones) {
-        if (entry.second->GetZoneName() != roomName)
-            continue;
-        gPlayer = gSonos->GetPlayer(entry.second, 0, onSonosEvent);
-        if (!gPlayer) {
-            printf("FAILED to connect\n");
-            return false;
-        }
-        printf("SUCCESS");
-        return true;
-    }
-    printf("FAILED to find room\n");
-    return false;
-}
-
-bool connectToSonos(const char* explicitIp)
-{
-    if (!explicitIp) {
-        printf("Connecting to Sonos ... ");
-        fflush(stdout);
-        if (!gSonos->Discover()) {
-            printf("No devices found (try specifying known Sonos player ip-address).\n");
-            return false;
-        }
-        printf("SUCCESS\n\n");
-        return true;
-    }
-
-    std::string deviceUrl = "http://" + std::string(explicitIp) + ":1400";
-    printf("Connecting to Sonos (through player %s) ... ", explicitIp);
-    fflush(stdout);
-    if (!gSonos->Discover(deviceUrl)) {
-        printf("Device is unreachable.\n");
-        return false;
-    }
-    printf("SUCCESS\n\n");
-    return true;
-}
 
 // One-shot mode: play a local file straight from the filesystem instead of
 // bridging an LMS/squeezelite session. Used for ad hoc testing, not the
@@ -695,10 +611,10 @@ void playLocalFileOnce(const std::string& filePath)
     if (dot != std::string::npos)
         extension = filePath.substr(dot + 1);
 
-    std::string url = gPlayer->GetControllerUri() + "/music/track." + extension
+    std::string url = gPlayer->controllerUri() + "/music/track." + extension
         + "?path=" + percentEncode(filePath);
 
-    if (gPlayer->PlayStream(url, ""))
+    if (gPlayer->playStream(url, ""))
         printf("Started playing URL %s\n", url.c_str());
     else
         printf("Failed to start URL %s\n", url.c_str());
@@ -710,17 +626,15 @@ void playLocalFileOnce(const std::string& filePath)
 void pollSonosPosition()
 {
     auto token = sonos_position_poll_token();
-    SONOS::ElementList posVars;
-    if (!gPlayer->GetPositionInfo(posVars))
-        return;
-    uint32_t ms = parse_reltime_ms(posVars.GetValue("RelTime"));
+    uint32_t ms;
+    if (!gPlayer->positionInfo(ms)) return;
     set_sonos_position_ms(token, ms);
 }
 
 // Runs the periodic (every ~30s, or immediately on a Sonos event) status
 // refresh: transport-state mirroring, error-state resume, and the printed
 // status table when anything actually changed.
-void refreshStatus(SONOS::Status& status)
+void refreshStatus(bridge::Status& status)
 {
     status.update();
     std::string transportState = status.getTransportState();
@@ -737,7 +651,7 @@ void refreshStatus(SONOS::Status& status)
         status.print();
 }
 
-void runBridgeLoop(SONOS::Status& status)
+void runBridgeLoop(bridge::Status& status)
 {
     unsigned idleTicks = 0;
     constexpr unsigned kStatusRefreshTicks = 3000;  // ~30s at the 10ms sleep below
@@ -856,33 +770,18 @@ int main(int argc, char** argv)
 
     printf("\n\n| sonos-lms -- bridges a Sonos zone player into an LMS/squeezelite session\n\n\n");
 
-    SONOS::System::Debug(debugLevel);
-    gSonos = new SONOS::System(0, onSonosEvent);
-
-    if (!connectToSonos(ip))
-        return EXIT_FAILURE;
-
-    {
-        SONOS::RequestBrokerPtr imageService(new SONOS::ImageService());
-        gSonos->RegisterRequestBroker(imageService);
-        gSonos->RegisterRequestBroker(SONOS::RequestBrokerPtr(new SONOS::SBStreamer(imageService.get())));
-        gSonos->RegisterRequestBroker(SONOS::RequestBrokerPtr(new SONOS::FileStreamer()));
-    }
-
-    SONOS::ZonePlayerList players = gSonos->GetZonePlayerList();
-    printDiscoveredPlayers(players);
-
-    SONOS::ZoneList zones = gSonos->GetZoneList();
-    printDiscoveredZones(zones);
-
+    auto serverBackend = new upnp::NosonStreamServer(debugLevel, onSonosEvent);
+    gStreamServer.reset(serverBackend);
+    gPlayer = std::make_shared<upnp::NosonSpeakerControl>(*serverBackend, onSonosEvent);
     if (!room) {
         printf("Please specify a room to join with the --room option\n");
         return EXIT_FAILURE;
     }
-    if (!connectToRoom(room, zones))
-        return EXIT_FAILURE;
+    if (!gPlayer->discover(room, ip ? ip : "")) return EXIT_FAILURE;
+    static bridge::SBStreamer streamer;
+    streamer.registerWith(*gStreamServer);
 
-    SONOS::Status status(gPlayer);
+    bridge::Status status(gPlayer);
     status.get_mac(gMac);
     printf(" (MAC = %02X:%02X:%02X:%02X:%02X:%02X)\n\n", gMac[0], gMac[1], gMac[2], gMac[3], gMac[4], gMac[5]);
     if (server) {

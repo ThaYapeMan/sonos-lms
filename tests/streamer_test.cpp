@@ -1,4 +1,5 @@
 #include "sbstreamer.h"
+#include "upnp/noson_stream_server.h"
 #include "sonos-position.h"
 #include "resume_state.h"
 #include "pause_mode.h"
@@ -18,6 +19,7 @@
 #include <vector>
 
 using namespace SONOS;
+using bridge::SBStreamer;
 static std::atomic<unsigned> generation(1), resumeCommands(0), sameURLRequests(0);
 static std::atomic<bool> paused(false), outputRunning(true);
 extern "C" int sonos_output_running() { return outputRunning.load(); }
@@ -140,8 +142,8 @@ private:
 static void serve(SBStreamer& broker, Socket& socket) {
     WSRequestBroker request(&socket, /*secure=*/false, /*timeout ms=*/1000);
     assert(request.IsParsed());
-    RequestBroker::handle handle{nullptr, &request};
-    assert(broker.HandleRequest(&handle));
+    auto handle = upnp::nosonRequest(request);
+    assert(broker.HandleRequest(handle.get()));
 }
 static void feed(int first, uint64_t firstFrame = 0) {
     // 8192 stereo frames produce real FLAC frames, not merely init metadata.

@@ -46,7 +46,7 @@ static void retryCases() {
 
     reset(); testingStreamStart = false; completedStream = 6; cliPlays = 0;
     resumeState.command('p'); resumeState.stopForPause(6); resumeState.observe("STOPPED");
-    player.property.TransportState = "TRANSITIONING";
+    player.property.state = "TRANSITIONING";
     cliResult = false;
     ResumeSqueezeBox(6); ResumeSqueezeBox(6);
     assert(cliPlays == 1); // failed CLI does not immediately spam a retry

@@ -13,41 +13,28 @@
 #ifndef SBSTREAMER_H
 #define SBSTREAMER_H
 
-#include "requestbroker.h"
+#include "upnp/stream_server.h"
+#include <atomic>
 
 #include <vector>
 
 #define SBSTREAMER_CNAME "squeezebox"
 #define SBSTREAMER_URI "/music/squeezebox.flac"
 
-namespace NSROOT {
+namespace bridge {
 
 // Registers "/music/squeezebox.flac" as a Sonos-facing HTTP resource and
 // serves the live FLAC-encoded PCM squeezelite hands to encode_squeezebox_audio().
-class SBStreamer : public RequestBroker {
+class SBStreamer {
 public:
-    explicit SBStreamer(RequestBroker* imageService = nullptr);
-    ~SBStreamer() override = default;
-
-    bool HandleRequest(handle* handle) override;
-
-    const char* CommonName() override { return SBSTREAMER_CNAME; }
-    RequestBroker::ResourcePtr GetResource(const std::string& title) override;
-    RequestBroker::ResourceList GetResourceList() override;
-    RequestBroker::ResourcePtr RegisterResource(const std::string& title, const std::string& description,
-        const std::string& path, StreamReader* delegate) override;
-    void UnregisterResource(const std::string& uri) override;
-
+    SBStreamer() = default;
+    void registerWith(upnp::StreamServer& server);
+    bool HandleRequest(upnp::StreamRequest* handle);
+    void Abort() { aborted = true; }
+    bool IsAborted() const { return aborted.load(); }
 private:
-    ResourceList m_resources;
-
-    void streamSqueezeBox(handle* handle, int stream);
-
-    void Reply400(handle* handle);
-
-    std::string getParamValue(const std::vector<std::string>& params, const std::string& name);
+    std::atomic<bool> aborted{false};
+    void streamSqueezeBox(upnp::StreamRequest* handle, int stream);
 };
-
-}  // namespace NSROOT
-
-#endif  // SBSTREAMER_H
+} // namespace bridge
+#endif

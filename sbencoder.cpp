@@ -17,8 +17,7 @@
 #include <cstring>
 #include <unistd.h>
 
-#include "private/ringbuffer.h"
-#include "private/byteorder.h"
+
 
 namespace {
 // One squeezelite decode batch's worth of interleaved stereo samples.
@@ -44,17 +43,17 @@ FLAC__int32 nextSampleAsInt32(const char*& cursor, int bitDepth)
         return v;
     }
     case 16: {
-        FLAC__int32 v = read_b16le(cursor);
+        FLAC__int32 v = upnp::littleEndianSample(cursor, 16);
         cursor += 2;
         return v;
     }
     case 24: {
-        FLAC__int32 v = read_b24le(cursor);
+        FLAC__int32 v = upnp::littleEndianSample(cursor, 24);
         cursor += 3;
         return v;
     }
     case 32: {
-        FLAC__int32 v = read_b32le(cursor);
+        FLAC__int32 v = upnp::littleEndianSample(cursor, 32);
         cursor += 4;
         return v;
     }
@@ -70,7 +69,7 @@ unsigned get_squeezebox_stream_id(void);
 int sonos_lms_is_paused(void);
 }  // extern "C"
 
-using namespace NSROOT;
+using namespace bridge;
 
 SBEncoder::SBEncoder(unsigned streamId)
     : m_phase(Phase::Init)
@@ -85,7 +84,7 @@ SBEncoder::SBEncoder(unsigned streamId)
     , m_pendingPacketConsumed(0)
     , m_flac(nullptr)
 {
-    m_encodedRing = new RingBuffer(kEncodedRingCapacity);
+    m_encodedRing = new upnp::EncodedBuffer(kEncodedRingCapacity);
     m_flac = new WriteBridge(this);
 }
 
@@ -111,22 +110,14 @@ bool SBEncoder::open(uint8_t sampleBits)
         return false;
     }
 
-    AudioFormat format;
-    format.byteOrder = AudioFormat::LittleEndian;
-    format.sampleType = AudioFormat::SignedInt;
-    format.sampleSize = sampleBits;
-    format.sampleRate = kSampleRateHz;
-    format.channelCount = kChannelCount;
-    format.codec = "audio/pcm";
-
     m_flac->set_verify(true);
     m_flac->set_compression_level(5);
-    m_flac->set_channels(format.channelCount);
-    m_flac->set_bits_per_sample(format.sampleSize);
-    m_flac->set_sample_rate(format.sampleRate);
+    m_flac->set_channels(kChannelCount);
+    m_flac->set_bits_per_sample(sampleBits);
+    m_flac->set_sample_rate(kSampleRateHz);
 
-    m_bytesPerFrame = format.bytesPerFrame();
-    m_sampleBits = format.sampleSize;
+    m_bytesPerFrame = (sampleBits / 8) * kChannelCount;
+    m_sampleBits = sampleBits;
 
     m_encodedRing->clear();
     if (m_pendingPacket) {
@@ -135,7 +126,7 @@ bool SBEncoder::open(uint8_t sampleBits)
     }
 
     delete[] m_interleaveBuf;
-    m_interleaveBuf = new FLAC__int32[kSamplesPerChunk * format.channelCount];
+    m_interleaveBuf = new FLAC__int32[kSamplesPerChunk * kChannelCount];
 
     FLAC__StreamEncoderInitStatus status = m_flac->init();
     if (status != FLAC__STREAM_ENCODER_INIT_STATUS_OK) {

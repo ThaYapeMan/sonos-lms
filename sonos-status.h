@@ -16,16 +16,16 @@
 #include <cstdint>
 #include <string>
 
-#include <sonosplayer.h>
-#include <sonossystem.h>
+#include "upnp/speaker_control.h"
+#include <memory>
 
-namespace NSROOT {
+namespace bridge {
 
 // Polls a Sonos zone player's transport and current-track metadata, and
 // reports whether anything worth logging has changed since the last poll.
 class Status {
 public:
-    explicit Status(PlayerPtr player);
+    explicit Status(std::shared_ptr<upnp::SpeakerControl> player);
     ~Status() = default;
 
     // Re-reads transport/track state from the player. Call before changed()
@@ -65,7 +65,7 @@ private:
         bool operator!=(const Snapshot& other) const { return !(*this == other); }
     };
 
-    PlayerPtr m_player;
+    std::shared_ptr<upnp::SpeakerControl> m_player;
     std::string m_zoneUuid;
     std::string m_zoneName;
 
@@ -76,6 +76,6 @@ private:
     Snapshot poll() const;
 };
 
-}  // namespace NSROOT
+}  // namespace bridge
 
 #endif  // SONOS_STATUS_H

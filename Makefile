@@ -1,6 +1,8 @@
 FLAGS_SL = -g -O3 -Wall -fno-common -Isqueezelite -Wno-error=incompatible-pointer-types -fpermissive
 
-OBJS = sonos-lms.o sbstreamer.o sbencoder.o sonos-status.o sonos-position.o
+UPNP_OBJS = upnp/encoded_buffer.o upnp/noson_stream_server.o upnp/noson_speaker_control.o
+
+OBJS = $(UPNP_OBJS) sonos-lms.o sbstreamer.o sbencoder.o sonos-status.o sonos-position.o
 
 OBJS_SL = squeezelite.o \
 	output_sonos.o \
@@ -40,15 +42,15 @@ sonos-lms: $(OBJS) $(OBJS_SL) noson/noson/libnoson.a
 		-lpthread -lm -lrt -ldl -lasound
 
 clean:
-	rm -f *.o squeezelite/*.o sonos-lms position-test encoder-test resume-state-test streamer-test
+	rm -f *.o upnp/*.o squeezelite/*.o sonos-lms position-test encoder-test resume-state-test streamer-test
 
 slimproto_sonos.o: slimproto_sonos.c squeezelite/slimproto.c squeezelite/squeezelite.h
 
 .PHONY: test install
 install:
 	scripts/install-devices.sh
-encoder-test: tests/encoder_test.cpp sbencoder.cpp sbencoder.h noson/noson/libnoson.a
-	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -DSBENCODER_TEST -o $@ tests/encoder_test.cpp sbencoder.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
+encoder-test: upnp/encoded_buffer.cpp upnp/encoded_buffer.h tests/encoder_test.cpp sbencoder.cpp sbencoder.h noson/noson/libnoson.a
+	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -DSBENCODER_TEST -o $@ tests/encoder_test.cpp sbencoder.cpp upnp/encoded_buffer.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
 
 test: position-test encoder-test resume-state-test streamer-test
 	./position-test
@@ -72,10 +74,10 @@ sonos-lms.o: resume_state.h stop_debounce.h
 resume-state-test: tests/resume_state_test.cpp resume_state.h stop_debounce.h
 	g++ -g -O2 -Wall -I. -o $@ tests/resume_state_test.cpp
 
-streamer-test: pause_mode.h tests/streamer_test.cpp sbstreamer.cpp sbstreamer.h sbencoder.cpp sbencoder.h resume_state.h noson/noson/libnoson.a
-	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -o $@ tests/streamer_test.cpp sbstreamer.cpp sbencoder.cpp sonos-position.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
+streamer-test: upnp/encoded_buffer.cpp upnp/encoded_buffer.h upnp/noson_stream_server.cpp pause_mode.h tests/streamer_test.cpp sbstreamer.cpp sbstreamer.h sbencoder.cpp sbencoder.h resume_state.h noson/noson/libnoson.a
+	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -o $@ tests/streamer_test.cpp sbstreamer.cpp sbencoder.cpp sonos-position.cpp upnp/noson_stream_server.cpp upnp/encoded_buffer.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
 
-sonos-lms.o streamer-test: pause_mode.h
+sonos-lms.o streamer-test: upnp/encoded_buffer.cpp upnp/encoded_buffer.h upnp/noson_stream_server.cpp pause_mode.h
 
 position-test: tests/position_test.cpp position_state.h
 	g++ -g -O2 -Wall -I. -o $@ tests/position_test.cpp
@@ -86,3 +88,5 @@ streamer-test: sonos-position.cpp position_state.h
 sonos-lms.o: transport_intent.h retry_budget.h
 
 sonos-lms.o sbstreamer.o streamer-test: stream_session.h
+
+$(OBJS) streamer-test: upnp/speaker_control.h upnp/stream_server.h upnp/noson_stream_server.h upnp/noson_speaker_control.h

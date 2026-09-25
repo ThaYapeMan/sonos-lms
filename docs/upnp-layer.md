@@ -1,0 +1,95 @@
+# The UPnP layer
+
+Phase 1 keeps noson as the default. The bridge talks to `upnp::SpeakerControl`
+and `upnp::StreamServer`; the noson adapters contain the discovery/control and
+HTTP implementation. HTTP handlers receive `upnp::StreamRequest`, never a noson
+handle. No SMAPI service is implemented. HTTP/XML helpers must not depend on LMS,
+stream generations, transport intent, or other bridge state.
+
+## Inventory before extraction
+
+References in this table are pinned to **b165e01**, so subsequent extraction does
+not invalidate the inventory. `main` means startup or the main status loop;
+`transport` means StopTimer/transport-intent dispatch under transportMutex;
+`HTTP` means a noson request worker; `output` means squeezelite's PCM producer.
+Paths without a prefix are repository-root paths.
+
+| Calls / types and original file:line | Wire work and result | Caller |
+|---|---|---|
+| `System`, `PlayerPtr` (`sonos-lms.cpp:61`, `:62`), `System::Debug`, constructor (`:859`) | Own subscriptions, listener and player; callback sets atomic gEvent. Debug changes logging only. | main; callback on noson event thread |
+| `System::Discover()` / `Discover(url)` (`sonos-lms.cpp:669`, `:680`) | SSDP multicast discovery (or explicit seed); device description and topology/subscriptions initialize the household. Returns startup success. | main startup |
+| `GetZonePlayerList`, `ZonePlayerList` (`sonos-lms.cpp:619`, `:872`); player `GetUUID/GetHost/GetPort` (`:625`) | Cached topology; printed device table. | main startup |
+| `GetZoneList`, `ZoneList`, zone `GetZoneName/GetCoordinator` (`sonos-lms.cpp:632`, `:646`, `:875`) | Cached topology; exact case-sensitive combined zone name (`Study + Sonos Port`), not whitespace token matching. | main startup |
+| `GetPlayer(zone, ..., callback)` (`sonos-lms.cpp:652`) | Controller for coordinator, subscriptions to AVTransport and RenderingControl. Failure aborts startup. | main startup |
+| `GetTransportProperty`, `AVTProperty.TransportStatus` (`sonos-lms.cpp:141`) | Cached event data; ERROR_LOST_CONNECTION triggers same-URL PlayStream recovery. No SOAP polling here. | transport |
+| `Stop/Pause/Play` (`sonos-lms.cpp:167`, `:288`) | AVTransport SOAP Stop, Pause, Play; InstanceID=0, Play Speed=1. Result drives bounded retries. HTTP EOF precedes Pause/Stop. | transport |
+| `GetRequestBroker`, `GetResource`, `ResourcePtr.uri/iconUri` (`sonos-lms.cpp:501`, `:560`) | Local lookup builds URL with session token and stream number, or artwork fallback. | main / HTTP redirect |
+| `GetControllerUri` (`sonos-lms.cpp:504`, `:565`, `:698`) | Local controller address reachable from speaker plus listener port; no SOAP. | main / HTTP redirect |
+| `GetTransportProperty().TransportState` (`sonos-lms.cpp:536`) | Event cache drives ObserveDeviceTransport and held-GET resume. Must remain nonblocking on HTTP worker. | HTTP / main |
+| `PlayStream(url,title,art)` (`sonos-lms.cpp:568`, `:701`) | SetAVTransportURI followed by Play only on success. Exact metadata below. Success completes stream-start generation. | main / transport |
+| `ElementList`, `GetPositionInfo`, `GetValue("RelTime")` (`sonos-lms.cpp:713`) | SOAP GetPositionInfo, InstanceID=0; noson caches successful result for 1 second. Feeds connection-specific position anchor. | main loop |
+| `GetZone/GetCoordinator/GetUUID/GetZoneName` (`sonos-status.cpp:44`) | Cached identity; display name and squeezelite MAC. | main startup |
+| `TransportPropertyEmpty`, `GetVolume(uuid,&volume)` (`sonos-status.cpp:58`, `:61`) | Event-cache availability; GetVolume sends SOAP to `/MediaRenderer/RenderingControl/Control` (InstanceID=0, Channel=Master). Result is displayed; failure displays zero. | main status refresh |
+| `ElementList/GetPositionInfo/GetValue`, `GetTransportProperty`, `AVTProperty`, `DigitalItemPtr/GetValue` (`sonos-status.cpp:64`, `:68`) | Position SOAP/cache plus event transport metadata title, album, creator, status, state, duration; populate display. | main status refresh |
+| `ImageService`, `FileStreamer`, `RequestBrokerPtr`, `RegisterRequestBroker` (`sonos-lms.cpp:866`) | HTTP routes: packaged icon, live stream, local file `--file`. FileStreamer handles finite file requests. | main registration; HTTP serving |
+| `RequestBroker` inheritance, `Resource/ResourcePtr/ResourceList`, `StreamReader` (`sbstreamer.h:29`, `:38`; `sbstreamer.cpp:187`, `:247`, `:258`) | Local route/resource registry. RegisterResource returns empty; UnregisterResource is a no-op for the fixed live route. | main / noson dispatch |
+| `ImageService::RegisterResource`, `DataReader::Instance`, `LIBVERSION` (`sbstreamer.cpp:193`, `:203`) | `/pulseaudio.png` packaged artwork; icon URI has `?id=<version>`. | main startup |
+| `IsAborted`, `handle`, `WSRequestBroker::GetRequestPath/GetRequestMethod/GetURIParams`, `tokenize/urldecode` (`sbstreamer.cpp:210`, `:213`, `:217`, `:220`, `:478`) | Inspect GET/HEAD and query; reject stale sessions, classify ACTIVE/STANDBY. | HTTP |
+| `ReplyData`, `Socket/Disconnect/GetHandle/IsValid` (`sbstreamer.cpp:225`, `:281`, `:292`, `:296`, `:320`, `:382`, `:426`, `:431`, `:435`, `:460`) | Raw HTTP headers, FLAC chunks, terminating chunk, redirect/error responses; 500ms send timeout and nonblocking peer probe. ReplyData reports boolean, not partial byte count. | HTTP |
+| `WSRequestReply/AddHeader/PostReply`, WS method/header/status enums (`sbstreamer.cpp:237`, `:467`) | Existing noson HEAD 200 and 400 formatting, kept by request adapter. | HTTP |
+| `AudioFormat`, `RingBuffer/RingBufferPacket`, byte-order helpers (`sbencoder.h:16`, `:28`; `sbencoder.cpp:20`, `:88`, `:114`, `:160`) | No network: PCM format, little-endian sample decoding, encoded FLAC packet queue. These are encoder utilities, not speaker control. | output and HTTP, protected by encoder mutex |
+
+## Event data versus polling
+
+`noson/noson/src/sonosplayer.cpp:255` copies `AVTransport::GetAVTProperty()`.
+`AVTransport` subscribes to `/MediaRenderer/AVTransport/Event` in
+`noson/noson/src/avtransport.cpp:69`. GENA NOTIFY arrives at the same noson listener
+that hosts HTTP streams; AVTransport parses LastChange and updates its locked
+property cache, then invokes the bridge callback. Reading GetTransportProperty
+never invokes GetTransportInfo. RenderingControl and ZoneGroupTopology have their
+own subscriptions. `GetPositionInfo` is separately cached SOAP (`avtransport.cpp:95`).
+The bridge main loop refreshes status after gEvent or roughly 30 seconds.
+
+## Exact FLAC metadata and SOAP
+
+Sources: `noson/noson/src/sonosplayer.cpp:554` (PlayStream), `:497` (SetCurrentURI),
+`digitalitem.cpp:51` and `:166` (item and DIDL), `element.h:49` and `:99`
+(serialization/escaping), `didlparser.cpp:31` (namespace order),
+`avtransport.cpp:250` (arguments), `service.cpp:67` (SOAP envelope).
+
+The FLAC path retains the HTTP URL. The item has **no id, parentID or restricted
+attributes**. Class precedes title; empty streamContent is an explicit open/close
+tag. Artwork is omitted only when empty. Namespace order and the space before
+DIDL's closing `>` matter for the golden comparison. Noson escapes `& < > "` but
+leaves apostrophes unchanged (safe in text and double-quoted attributes).
+Non-FLAC file mode uses x-rincon-mp3radio URI/protocol as noson does.
+
+The fixtures use URL `http://bridge:1400/music/squeezebox.flac?session=0123456789abcdef&stream=7`,
+title `A & B <Live> "Mix" '26`, and artwork `http://lms:9000/art?a=1&b=2`.
+`tests/noson_golden.cpp` runs the actual noson DigitalItem and AVTransport client;
+the SOAP fixture was captured by a loopback HTTP speaker, not inferred.
+
+DIDL-Lite (one line):
+
+```xml
+<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ><item><upnp:class>object.item.audioItem</upnp:class><dc:title>A &amp; B &lt;Live&gt; &quot;Mix&quot; '26</dc:title><r:streamContent></r:streamContent><upnp:albumArtURI>http://lms:9000/art?a=1&amp;b=2</upnp:albumArtURI><res protocolInfo="x-rincon-mp3radio:*:audio/flac:*">http://bridge:1400/music/squeezebox.flac?session=0123456789abcdef&amp;stream=7</res></item></DIDL-Lite>
+```
+
+HTTP/1.1 POST `/MediaRenderer/AVTransport/Control`, SOAPAction
+`"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI"`, Content-Type
+`text/xml`. Exact body (no trailing newline on the wire):
+
+```xml
+<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"><InstanceID>0</InstanceID><CurrentURI>http://bridge:1400/music/squeezebox.flac?session=0123456789abcdef&amp;stream=7</CurrentURI><CurrentURIMetaData>&lt;DIDL-Lite xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/&quot; xmlns:r=&quot;urn:schemas-rinconnetworks-com:metadata-1-0/&quot; xmlns:dc=&quot;http://purl.org/dc/elements/1.1/&quot; xmlns:upnp=&quot;urn:schemas-upnp-org:metadata-1-0/upnp/&quot; &gt;&lt;item&gt;&lt;upnp:class&gt;object.item.audioItem&lt;/upnp:class&gt;&lt;dc:title&gt;A &amp;amp; B &amp;lt;Live&amp;gt; &amp;quot;Mix&amp;quot; '26&lt;/dc:title&gt;&lt;r:streamContent&gt;&lt;/r:streamContent&gt;&lt;upnp:albumArtURI&gt;http://lms:9000/art?a=1&amp;amp;b=2&lt;/upnp:albumArtURI&gt;&lt;res protocolInfo=&quot;x-rincon-mp3radio:*:audio/flac:*&quot;&gt;http://bridge:1400/music/squeezebox.flac?session=0123456789abcdef&amp;amp;stream=7&lt;/res&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;</CurrentURIMetaData></u:SetAVTransportURI></s:Body></s:Envelope>
+```
+
+`upnp/encoded_buffer.*` wraps the remaining noson packet queue and endian helpers;
+SBEncoder itself now lives in the bridge namespace. Its FLAC settings and queue
+semantics are unchanged. AudioFormat's fixed PCM values are applied directly.
+The interfaces return value types and express failure separately from an empty URI
+or a zero position. `currentUri()` explicitly calls GetMediaInfo/CurrentURI, not
+GetPositionInfo/TrackURI. It is available for later ownership work and does not
+change ownership policy in this phase.
+
+Display volume is a separate interface call because noson GetVolume performs SOAP.
+It must never be called by the cached transport read on an HTTP worker.

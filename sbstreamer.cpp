@@ -13,15 +13,6 @@
 #include "sbstreamer.h"
 #include "stream_session.h"
 
-#include "data/datareader.h"
-#include "imageservice.h"
-#include "private/tokenizer.h"
-#include "private/uriencoder.h"
-#include "requestbroker.h"
-#include "private/wsrequestbroker.h"
-#include "private/wsrequestreply.h"
-#include "private/socket.h"
-#include <sys/socket.h>
 #include "sbencoder.h"
 #include "sonos-position.h"
 
@@ -45,7 +36,7 @@
 #define SBSTREAMER_STANDBY_TIMEOUT 30000
 #define SBSTREAMER_CHUNK 16384
 
-using namespace NSROOT;
+using namespace bridge;
 
 // The LMS generation outlives every HTTP connection. Each ACTIVE request owns
 // a fresh FLAC encoder in that generation; STANDBY requests have no encoder.
@@ -184,59 +175,41 @@ void encode_squeezebox_audio(const char* data, int len, uint64_t firstFrame)
 }
 } // extern "C"
 
-SBStreamer::SBStreamer(RequestBroker* imageService)
-    : RequestBroker()
-    , m_resources()
+void SBStreamer::registerWith(upnp::StreamServer& server)
 {
-    ResourcePtr icon;
-    if (imageService) {
-        icon = imageService->RegisterResource(SBSTREAMER_CNAME, "Icon for " SBSTREAMER_CNAME,
-            SBSTREAMER_ICON, DataReader::Instance());
-    }
-
-    ResourcePtr streamResource(new Resource());
-    streamResource->uri = SBSTREAMER_URI;
-    streamResource->title = SBSTREAMER_CNAME;
-    streamResource->description = SBSTREAMER_DESC;
-    streamResource->contentType = SBSTREAMER_CONTENT;
-    if (icon)
-        streamResource->iconUri.assign(icon->uri).append("?id=" LIBVERSION);
-
-    m_resources.push_back(streamResource);
+    server.registerStream(SBSTREAMER_CNAME, SBSTREAMER_URI, SBSTREAMER_DESC,
+        SBSTREAMER_CONTENT, SBSTREAMER_ICON,
+        [this](upnp::StreamRequest& request) { return HandleRequest(&request); });
 }
 
-bool SBStreamer::HandleRequest(handle* handle)
+bool SBStreamer::HandleRequest(upnp::StreamRequest* handle)
 {
     if (IsAborted())
         return false;
 
-    const std::string& requestUri = handle->broker->GetRequestPath();
+    const std::string& requestUri = handle->path();
     if (requestUri.compare(0, strlen(SBSTREAMER_URI), SBSTREAMER_URI) != 0)
         return false;
 
-    const auto method = handle->broker->GetRequestMethod();
-    if (method != WS_METHOD_Get && method != WS_METHOD_Head) return false;
-    std::vector<std::string> params;
-    tokenize(handle->broker->GetURIParams(), "&", "", params, true);
-    const std::string session = getParamValue(params, "session");
+    const auto method = handle->method();
+    if (method != upnp::StreamRequest::Method::Get && method != upnp::StreamRequest::Method::Head) return false;
+    const std::string session = handle->parameter("session");
     if (session != streamSessionToken()) {
         printf("stale request: session %s != %s\n", session.c_str(), streamSessionToken().c_str());
         const std::string response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        handle->broker->ReplyData(response.c_str(), response.size());
-        handle->broker->Socket()->Disconnect();
+        handle->send(response.c_str(), response.size());
+        handle->disconnect();
         return true;
     }
 
     switch (method) {
-    case WS_METHOD_Get: {
-        int stream = atoi(getParamValue(params, "stream").c_str());
+    case upnp::StreamRequest::Method::Get: {
+        int stream = atoi(handle->parameter("stream").c_str());
         streamSqueezeBox(handle, stream);
         return true;
     }
-    case WS_METHOD_Head: {
-        WSRequestReply reply(*handle->broker);
-        reply.AddHeader(WS_HEADER_Content_Type, SBSTREAMER_CONTENT);
-        reply.PostReply(WS_STATUS_200_OK);
+    case upnp::StreamRequest::Method::Head: {
+        handle->reply(200, SBSTREAMER_CONTENT);
         return true;
     }
     default:
@@ -244,51 +217,13 @@ bool SBStreamer::HandleRequest(handle* handle)
     }
 }
 
-RequestBroker::ResourcePtr SBStreamer::GetResource(const std::string& title)
-{
-    (void)title;
-    return m_resources.front();
-}
-
-RequestBroker::ResourceList SBStreamer::GetResourceList()
-{
-    return ResourceList(m_resources.begin(), m_resources.end());
-}
-
-RequestBroker::ResourcePtr SBStreamer::RegisterResource(const std::string& title,
-    const std::string& description, const std::string& path, StreamReader* delegate)
-{
-    // This broker exposes exactly one fixed resource (the live stream); it
-    // does not support registering additional ones.
-    (void)title;
-    (void)description;
-    (void)path;
-    (void)delegate;
-    return ResourcePtr();
-}
-
-void SBStreamer::UnregisterResource(const std::string& uri)
-{
-    (void)uri;
-}
-
-void SBStreamer::streamSqueezeBox(handle* handle, int stream)
+void SBStreamer::streamSqueezeBox(upnp::StreamRequest* handle, int stream)
 {
     printf("Sonos requested stream %d\n", stream);
     // Bound a stalled peer as well as a stalled PCM producer. noson SendData
     // uses the socket directly, so SetTimeout (receive only) is insufficient.
-    timeval sendTimeout{0, 500000};
-    setsockopt(handle->broker->Socket()->GetHandle(), SOL_SOCKET, SO_SNDTIMEO,
-               &sendTimeout, sizeof(sendTimeout));
-
-    auto peerClosed = [handle] {
-        auto socket = handle->broker->Socket();
-        if (!socket->IsValid()) return true;
-        if (socket->GetHandle() < 0) return false; // in-memory test socket
-        char byte;
-        int result = recv(socket->GetHandle(), &byte, 1, MSG_PEEK | MSG_DONTWAIT);
-        return result == 0 || (result < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR);
-    };
+    handle->sendTimeout(500);
+    auto peerClosed = [handle] { return handle->peerClosed(); };
 
     auto request = std::make_shared<StreamRequest>();
     {
@@ -298,7 +233,7 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
     }
     unsigned current = get_squeezebox_stream_id();
     if (stream <= 0 || (unsigned)stream > current) {
-        Reply400(handle);
+        handle->reply(400);
         return;
     }
     auto redirect = [&] {
@@ -306,7 +241,7 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
         std::string response = "HTTP/1.1 302 Found\r\nLocation: " + url
             + "\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
         printf("stream %d: HTTP 302 -> %s\n", stream, url.c_str());
-        handle->broker->ReplyData(response.c_str(), response.size());
+        handle->send(response.c_str(), response.size());
     };
     if ((unsigned)stream < current) {
         redirect();
@@ -368,7 +303,7 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
         }
         if (disconnect || obsolete) {
             if (obsolete && !disconnect) redirect();
-            handle->broker->Socket()->Disconnect();
+            handle->disconnect();
             return;
         }
         usleep(5000);
@@ -398,7 +333,7 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
     if (opened && !closedResume && (!waitForResumeAudio || !waitingForAudio()) && !enc->cancelled())
         r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed);
     bool streamReady = r >= 4 && memcmp(buf, "fLaC", 4) == 0;
-    const std::string streamingHeaders = "HTTP/1.1 200 OK\r\nServer: libnoson/" LIBVERSION "\r\nConnection: close\r\n"
+    const std::string streamingHeaders = "HTTP/1.1 200 OK\r\nServer: " + handle->serverName() + "\r\nConnection: close\r\n"
         "Content-Type: audio/flac\r\nTransfer-Encoding: chunked\r\n\r\n";
     if (closedResume) {
         printf("held resume GET #%llu closed by client\n", request->id);
@@ -412,7 +347,7 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
         if (expiredResume) printf("held resume GET #%llu expired\n", request->id);
         printf("stream %d: no audio before timeout or connection replaced\n", stream);
         std::string error = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        handle->broker->ReplyData(error.c_str(), error.size());
+        handle->send(error.c_str(), error.size());
     } else {
         request->serving = true;
         if (heldResume) printf("held resume GET #%llu fed\n", request->id);
@@ -423,7 +358,7 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
         auto send = [&](const char* data, size_t size) {
             if (sendFailed) return false;
             errno = 0;
-            if (handle->broker->ReplyData(data, size)) {
+            if (handle->send(data, size)) {
                 sent += size;
                 return true;
             }
@@ -471,25 +406,9 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
         }
     }
     // Preserve paused encoders and send EOF before disconnecting.
-    handle->broker->Socket()->Disconnect();
+    handle->disconnect();
     if (!enc->responseEnded()) enc->close();
     printf("stream %d: done\n", stream);
 
     printf("Done serving stream %d to Sonos\n", stream);
-}
-
-void SBStreamer::Reply400(handle* handle)
-{
-    WSRequestReply reply(*handle->broker);
-    reply.PostReply(WS_STATUS_400_Bad_Request);
-}
-
-std::string SBStreamer::getParamValue(const std::vector<std::string>& params, const std::string& name)
-{
-    size_t prefixLen = name.length() + 1;  // name + '='
-    for (const std::string& param : params) {
-        if (param.length() > prefixLen && param.at(name.length()) == '=' && param.compare(0, name.length(), name) == 0)
-            return urldecode(param.substr(prefixLen));
-    }
-    return std::string();
 }
