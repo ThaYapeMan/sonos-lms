@@ -2,6 +2,7 @@
 #include "sonos-position.h"
 #include "resume_state.h"
 #include "pause_mode.h"
+#include "stream_session.h"
 #include "private/socket.h"
 #include "private/wsrequestbroker.h"
 #include <FLAC++/decoder.h>
@@ -38,7 +39,7 @@ extern "C" int squeezebox_response_ended(unsigned stream);
 extern "C" int squeezebox_response_open(unsigned stream);
 extern "C" void acknowledge_squeezebox_resume(unsigned stream);
 extern "C" void invalidate_squeezebox_held_get(unsigned stream);
-std::string SqueezeBoxURL(unsigned id) { return "http://bridge/music/squeezebox.flac?stream=" + std::to_string(id); }
+std::string SqueezeBoxURL(unsigned id) { return "http://bridge/music/squeezebox.flac?session=" + streamSessionToken() + "&stream=" + std::to_string(id); }
 void ResumeSqueezeBox(unsigned id) {
     std::lock_guard<std::mutex> lock(stateMutex);
     state.observe(deviceState);
@@ -69,8 +70,9 @@ void ResumeSqueezeBox(unsigned id) {
 // network access: only the socket I/O and LMS/device event source are simulated.
 class Socket : public TcpSocket {
 public:
-    explicit Socket(unsigned id, bool probe = false, bool stayOpen = false, const char* method = "GET") : probe(probe), stayOpen(stayOpen) {
-        input = std::string(method) + " /music/squeezebox.flac?stream=" + std::to_string(id) + " HTTP/1.1\r\nHost: bridge\r\n\r\n";
+    explicit Socket(unsigned id, bool probe = false, bool stayOpen = false, const char* method = "GET", const std::string& session = streamSessionToken()) : probe(probe), stayOpen(stayOpen) {
+        input = std::string(method) + " /music/squeezebox.flac?stream=" + std::to_string(id)
+            + (session.empty() ? "" : "&session=" + session) + " HTTP/1.1\r\nHost: bridge\r\n\r\n";
     }
     size_t ReceiveData(void* buf, size_t n) override {
         n = std::min(n, input.size() - offset);
@@ -259,7 +261,52 @@ static void stoppedRestartTest() {
     puts("PASS: LMS restart after q-Stop redirects held GET to fresh playable generation without 503");
 }
 
+static void sessionTest() {
+    SBStreamer broker;
+    const auto token = streamSessionToken();
+    assert(token.size() == 16 && token.find_first_not_of("0123456789abcdef") == std::string::npos);
+    assert(streamSessionToken() == token);
+    // A stale request must not resume even when all device-resume guards match.
+    state.command('q'); state.stopForPause(1); state.observe("STOPPED");
+    deviceState = "TRANSITIONING"; paused = true;
+    auto reject = [&] {
+        for (const char* method : {"GET", "HEAD"}) {
+            for (const char* session : {"", "previous-process"}) {
+                Socket stale(1, false, false, method, session);
+                serve(broker, stale);
+                assert(stale.wire == "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                assert(stale.disconnected && stale.body.empty());
+                assert(resumeCommands == 0 && sameURLRequests == 0 && generation == 1);
+            }
+        }
+    };
+    reject();
+    assert(!squeezebox_response_open(1) && !squeezebox_response_ended(1));
+    Socket head(1, false, false, "HEAD");
+    serve(broker, head);
+    assert(head.headers.find("200 OK") != std::string::npos);
+    assert(!squeezebox_response_open(1) && resumeCommands == 0);
+    paused = false; state = ResumeState{};
+    Socket active(1, false, true), standby(1, false, true);
+    auto first = std::async(std::launch::async, [&] { serve(broker, active); });
+    waitUntil([&] { return active.headersSent.load(); });
+    feed(1970); waitUntil([&] { return active.audioSeen.load(); });
+    auto second = std::async(std::launch::async, [&] { serve(broker, standby); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    reject();
+    assert(squeezebox_response_open(1) && !standby.headersSent && !active.disconnected);
+    unsigned packets = active.audioPackets;
+    feed(1980); waitUntil([&] { return active.audioPackets > packets; });
+    active.clientClosed = true; ready(first);
+    waitUntil([&] { return standby.headersSent.load(); });
+    feed(1990); waitUntil([&] { return standby.audioSeen.load(); });
+    standby.clientClosed = true; ready(second);
+    playable(active, 1970); playable(standby, 1990);
+    puts("PASS: matching session GET/HEAD served; missing/wrong session GET/HEAD return empty 404 without resume or ACTIVE/STANDBY changes");
+}
+
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "session") { sessionTest(); return 0; }
     if (argc > 1 && std::string(argv[1]) == "shutdown") {
         paused = true;
         auto producer = std::async(std::launch::async, [] { feed(2300); });

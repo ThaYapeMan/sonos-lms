@@ -2,6 +2,7 @@
 #include "transport_intent.h"
 #include "pause_mode.h"
 #include "stop_debounce.h"
+#include "stream_session.h"
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -36,7 +37,7 @@ struct FakePlayer {
     Transport GetTransportProperty() { return property; }
     std::string GetControllerUri() { return "http://bridge"; }
     bool PlayStream(const std::string& url, const std::string&, const std::string&) {
-        assert(url == "http://bridge/music/squeezebox.flac?stream=6");
+        assert(url == "http://bridge/music/squeezebox.flac?session=" + streamSessionToken() + "&stream=6");
         callOrder.push_back("PlayStream");
         if (!testingStreamStart) {
             assert(heldGetInvalidations == streamPlays + 1);
@@ -87,7 +88,8 @@ static bool sendLmsCommand(int, int, const char* command) {
 }
 // The real PlaySqueezeBoxLocked runs too; only its network/data sources are fake.
 #define SBSTREAMER_CNAME "squeezebox"
-struct Resource { std::string iconUri = "/icon.png"; };
+struct Resource { std::string iconUri = "/icon.png", uri = "/music/squeezebox.flac"; };
+namespace SONOS { struct RequestBroker { using ResourcePtr = Resource*; }; }
 struct FakeBroker {
     Resource resource;
     Resource* GetResource(const char*) { return &resource; }
@@ -99,10 +101,6 @@ struct FakeSystem {
 static FakeSystem* gSonos = &systemStub;
 struct TrackInfo { std::string title, artworkUrl; };
 static TrackInfo fetchLmsTrackInfo(int, int) { return {"Test track", "http://bridge/art"}; }
-static std::string SqueezeBoxURL(unsigned id) {
-    assert(id == 6);
-    return "http://bridge/music/squeezebox.flac?stream=" + std::to_string(id);
-}
 static void reset_sonos_position(unsigned) {}
 namespace SONOS {
 struct Status {
@@ -155,6 +153,11 @@ static void paused(const char* status) {
 #include "retry_cases.h"
 
 int main() {
+    assert(SqueezeBoxURL(6) == "http://bridge/music/squeezebox.flac?session=" + streamSessionToken() + "&stream=6");
+    systemStub.broker.resource.uri += "?existing=1";
+    assert(SqueezeBoxURL(7) == "http://bridge/music/squeezebox.flac?existing=1&session=" + streamSessionToken() + "&stream=7");
+    systemStub.broker.resource.uri = "/music/squeezebox.flac";
+    puts("PASS: production SqueezeBoxURL includes the process token and preserves existing query parameters");
     transportIntentCases();
     retryCases();
     deferredStopCases();

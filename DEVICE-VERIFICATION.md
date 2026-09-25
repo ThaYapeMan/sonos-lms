@@ -10,7 +10,12 @@ journalctl -fu 'sonos-squeezebox@Sonos\x20Port.service' -o short-precise
 
 A stream N is an HTTP delivery generation established by LMS `strm s`, not a
 track. One track may legitimately use several IDs after rewinds, starts, and
-seeks. Re-priming a pause-ended response uses the same current URL and ID.
+seeks. URLs have `?session=<token>&stream=<N>` (or `&session=...` after existing
+parameters); the random session is logged once at startup. After a bridge restart,
+GET and HEAD of the previous URL, or a URL missing `session`, must return 404 with
+`Content-Length: 0` and `Connection: close`, log `stale request: session ...`, and
+produce no ACTIVE/STANDBY or device-resume activity. The current session still
+serves audio normally. Re-priming a pause-ended response uses the same current URL and ID.
 
 Verified on 2026-09-25: the native-FLAC relay test `120607` completed three
 Stop-after-pause resumes with fresh FLAC GETs, status OK, and no reported dialog.

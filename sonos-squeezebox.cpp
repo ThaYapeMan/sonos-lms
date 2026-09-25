@@ -24,6 +24,7 @@
 #include "sonos-position.h"
 #include "sonos-status.h"
 #include "stop_debounce.h"
+#include "stream_session.h"
 
 extern "C" {
 unsigned get_squeezebox_stream_id(void);
@@ -500,7 +501,7 @@ std::string SqueezeBoxURL(unsigned stream_id)
     if (!res) return "";
     return gPlayer->GetControllerUri() + res->uri
         + (res->uri.find('?') == std::string::npos ? "?" : "&")
-        + "stream=" + std::to_string(stream_id);
+        + "session=" + streamSessionToken() + "&stream=" + std::to_string(stream_id);
 }
 
 static void ObserveDeviceTransport(const std::string& state)
@@ -834,6 +835,12 @@ int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     (void)pauseMode();
+    try {
+        printf("Stream session: %s\n", streamSessionToken().c_str());
+    } catch (const std::exception& error) {
+        fprintf(stderr, "%s\n", error.what());
+        return EXIT_FAILURE;
+    }
 
     int debugLevel = findFlag(argc, argv, "--debug") ? 4 : 0;
     const char* ip = findOption(argc, argv, "--ip");

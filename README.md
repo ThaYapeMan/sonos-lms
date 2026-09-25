@@ -195,6 +195,12 @@ header for `audio/flac` requests, and injecting the blocks anyway just corrupts
 the stream (`ERROR_CORRUPT_FILE`). Track title and artwork are therefore only ever
 set once, at stream start.
 
+Stream URLs include a random token generated once per process start:
+`/music/squeezebox.flac?session=<token>&stream=<N>`. The startup log prints
+`Stream session: <token>`. GET and HEAD requests with a missing or different
+token receive an empty 404 with `Connection: close`, before encoder ownership
+or device-resume handling. Old URLs cannot match a reused stream ID after restart.
+
 ## Pause and resume on Sonos
 
 Pausing ends the HTTP response and sends UPnP **Stop** by default. Sonos resumes

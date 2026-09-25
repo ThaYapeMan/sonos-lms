@@ -168,10 +168,10 @@ sonos_state() {
 
 # Which song the speaker is playing, from the bridge journal:
 #   "Creating new stream (N)" + "PlaySqueezeBox: title='...'" map stream N to a song;
-#   the status table's "| Title  squeezebox.flac?stream=N |" is what the speaker plays.
+#   the status table's "| Title  squeezebox.flac?session=TOKEN&stream=N |" is what the speaker plays.
 journal_tail() { have journalctl && journalctl -u "$UNIT" -n 600 -o cat --no-pager 2>/dev/null; }
 bridge_stream() { journal_tail | sed -n 's/^Creating new stream (\([0-9]*\)).*/\1/p' | tail -n1; }
-speaker_stream() { journal_tail | sed -n 's/^| Title  *squeezebox\.flac?stream=\([0-9]*\).*/\1/p' | tail -n1; }
+speaker_stream() { journal_tail | sed -nE 's/^\| Title  *squeezebox\.flac\?([^ ]*&)?stream=([0-9]+).*/\2/p' | tail -n1; }
 stream_song() {
     [[ -n $1 ]] || return 0
     journal_tail | awk -v n="$1" '

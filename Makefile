@@ -52,6 +52,7 @@ encoder-test: tests/encoder_test.cpp sbencoder.cpp sbencoder.h noson/noson/libno
 
 test: position-test encoder-test resume-state-test streamer-test
 	./position-test
+	./streamer-test session
 	./streamer-test position
 	./streamer-test shutdown
 	python3 tests/output_shutdown_test.py
@@ -81,3 +82,5 @@ output_sonos.o sonos-squeezebox.o sbstreamer.o streamer-test: sonos-position.h
 streamer-test: sonos-position.cpp position_state.h
 
 sonos-squeezebox.o: transport_intent.h retry_budget.h
+
+sonos-squeezebox.o sbstreamer.o streamer-test: stream_session.h

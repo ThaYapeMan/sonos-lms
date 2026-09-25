@@ -11,6 +11,7 @@
 // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 
 #include "sbstreamer.h"
+#include "stream_session.h"
 
 #include "data/datareader.h"
 #include "imageservice.h"
@@ -193,10 +194,21 @@ bool SBStreamer::HandleRequest(handle* handle)
     if (requestUri.compare(0, strlen(SBSTREAMER_URI), SBSTREAMER_URI) != 0)
         return false;
 
-    switch (handle->broker->GetRequestMethod()) {
+    const auto method = handle->broker->GetRequestMethod();
+    if (method != WS_METHOD_Get && method != WS_METHOD_Head) return false;
+    std::vector<std::string> params;
+    tokenize(handle->broker->GetURIParams(), "&", "", params, true);
+    const std::string session = getParamValue(params, "session");
+    if (session != streamSessionToken()) {
+        printf("stale request: session %s != %s\n", session.c_str(), streamSessionToken().c_str());
+        const std::string response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        handle->broker->ReplyData(response.c_str(), response.size());
+        handle->broker->Socket()->Disconnect();
+        return true;
+    }
+
+    switch (method) {
     case WS_METHOD_Get: {
-        std::vector<std::string> params;
-        tokenize(handle->broker->GetURIParams(), "&", "", params, true);
         int stream = atoi(getParamValue(params, "stream").c_str());
         streamSqueezeBox(handle, stream);
         return true;

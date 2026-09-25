@@ -21,6 +21,7 @@ def production_function(signature):
 # Extract, rather than duplicate, the production control flow. The fixture
 # supplies only external state, network calls, and status/HTTP observations.
 bodies = "\n\n".join(production_function(signature) for signature in (
+    "std::string SqueezeBoxURL(unsigned stream_id)",
     "static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition)\n",
     'extern "C" void new_squeezebox_stream_id(',
     "static void dispatchDeferredStop(",
@@ -38,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix="sonos-device-resume-") as directory:
     subprocess.run([
         "g++", "-g", "-O2", "-Wall", "-Wextra", "-I", str(ROOT),
         "-I", str(directory), str(ROOT / "tests/device_resume_fixture.cpp"),
-        "-o", str(executable), "-lpthread",
+        "-o", str(executable), "-lpthread", "-lcrypto",
     ], check=True)
     for mode in ("stop", "pause"):
         subprocess.run([str(executable)], check=True,
