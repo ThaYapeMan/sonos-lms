@@ -65,7 +65,7 @@ FLAC__int32 nextSampleAsInt32(const char*& cursor, int bitDepth)
 }  // namespace
 
 extern "C" {
-uint32_t get_sb_time_ms(void);
+uint64_t get_sb_time_ms(void);
 unsigned get_squeezebox_stream_id(void);
 int sonos_lms_is_paused(void);
 }  // extern "C"
@@ -259,11 +259,13 @@ int SBEncoder::read(char* data, int maxlen, unsigned timeout, bool holdWhilePaus
     }
 }
 
-int SBEncoder::write(const char* data, int len, unsigned timeout, const std::function<void()>& firstPcm)
+int SBEncoder::write(const char* data, int len, unsigned timeout, const std::function<void()>& firstPcm,
+    const std::function<bool()>& interrupted)
 {
     const bool limited = timeout != 0;
 
     for (;;) {
+        if (interrupted && interrupted()) return 0;
         if (cancelled() || responseEnded() || producerRetired())
             return 0;
         if (m_phase != Phase::Encoding) {
@@ -281,9 +283,9 @@ int SBEncoder::write(const char* data, int len, unsigned timeout, const std::fun
             return 0;
         }
 
-        uint32_t encodedMs = (uint32_t)((uint64_t)m_pcmBytesAccepted / (uint64_t)m_bytesPerFrame
-            * 1000ULL / (uint64_t)kSampleRateHz);
-        uint32_t playedMs = m_firstReadAtMs ? get_sb_time_ms() - m_firstReadAtMs : 0;
+        const uint64_t encodedMs = m_pcmBytesAccepted / m_bytesPerFrame * 1000ULL / kSampleRateHz;
+        const uint64_t firstRead = m_firstReadAtMs.load();
+        const uint64_t playedMs = firstRead ? get_sb_time_ms() - firstRead : 0;
 
         // Sonos drops its old HTTP connection on resume, so keep the
         // encode-ahead window short: reconnect loss should stay under a

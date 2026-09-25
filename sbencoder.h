@@ -33,6 +33,9 @@ class RingBufferPacket;
 // Sonos playback progress and pausing cleanly instead of buffering ahead.
 class SBEncoder {
     friend class WriteBridge;
+#ifdef SBENCODER_TEST
+    friend struct EncoderTestAccess;
+#endif
 
 public:
     explicit SBEncoder(unsigned streamId);
@@ -44,7 +47,8 @@ public:
     // Blocks (up to timeout ms, 0 = forever) until len bytes of PCM have
     // been accepted into the encoder, or the stream ends/is cancelled.
     int write(const char* data, int len, unsigned timeout,
-        const std::function<void()>& firstPcm = {});
+        const std::function<void()>& firstPcm = {},
+        const std::function<bool()>& interrupted = {});
 
     // Blocks (up to timeout ms, 0 = forever) until some encoded FLAC bytes
     // are available, or the stream ends/is cancelled. While holdWhilePaused
@@ -96,8 +100,8 @@ private:
     std::atomic<bool> m_producerRetired{false};
     std::atomic<bool> m_producedAudio{false};
     std::mutex m_writeMutex;
-    std::atomic<uint32_t> m_firstReadAtMs;  // set on the first successful read()
-    uint32_t m_pcmBytesAccepted;            // running total handed to the encoder
+    std::atomic<uint64_t> m_firstReadAtMs;  // set on the first successful read()
+    uint64_t m_pcmBytesAccepted;            // running total handed to the encoder
     int m_bytesPerFrame;
     int m_sampleBits;
     unsigned m_streamId;

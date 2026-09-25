@@ -60,7 +60,7 @@ const char* findOption(int argc, char** argv, const std::string& option);
 SONOS::System* gSonos = 0;
 SONOS::PlayerPtr gPlayer;
 uint8_t gMac[6];
-volatile bool gEvent = true;
+std::atomic<bool> gEvent{true};
 static std::string gServer;
 
 // The restart window lasts from allocation until PlayStream completes. A separate
@@ -734,8 +734,8 @@ void runBridgeLoop(SONOS::Status& status)
 
         pollSonosPosition();
 
-        if (idleTicks >= kStatusRefreshTicks || gEvent) {
-            gEvent = false;
+        const bool eventPending = gEvent.exchange(false);
+        if (idleTicks >= kStatusRefreshTicks || eventPending) {
             refreshStatus(status);
             idleTicks = 0;
         } else {
@@ -901,7 +901,7 @@ namespace {
 void onSonosEvent(void* handle)
 {
     (void)handle;
-    gEvent = true;
+    gEvent.store(true);
 }
 
 const char* findFlag(int argc, char** argv, const std::string& flag)

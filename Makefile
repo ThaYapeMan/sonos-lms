@@ -48,11 +48,13 @@ slimproto_sonos.o: slimproto_sonos.c squeezelite/slimproto.c squeezelite/squeeze
 install:
 	scripts/install-devices.sh
 encoder-test: tests/encoder_test.cpp sbencoder.cpp sbencoder.h noson/noson/libnoson.a
-	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -o $@ tests/encoder_test.cpp sbencoder.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
+	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -DSBENCODER_TEST -o $@ tests/encoder_test.cpp sbencoder.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
 
 test: position-test encoder-test resume-state-test streamer-test
 	./position-test
 	./streamer-test position
+	./streamer-test shutdown
+	python3 tests/output_shutdown_test.py
 	./encoder-test
 	./resume-state-test
 	SONOS_SQUEEZEBOX_PAUSE=pause ./streamer-test

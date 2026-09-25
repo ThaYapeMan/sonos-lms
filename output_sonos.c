@@ -13,6 +13,7 @@
 #include "squeezelite.h"
 #include "output_sonos.h"
 #include "sonos-position.h"
+#include <stdatomic.h>
 
 #if BYTES_PER_FRAME != 8
 #error BYTES_PER_FRAME not 8 bytes
@@ -31,7 +32,8 @@ void encode_squeezebox_audio(const char* data, int len, uint64_t first_frame);
 
 static log_level loglevel;
 static thread_type pump_thread;
-static volatile bool pump_running = true;
+static atomic_bool pump_running = false;
+static bool pump_started = false;
 
 // Encoder-facing PCM staging buffer: squeezelite hands us frames a batch at
 // a time via _sonos_write_frames(), we accumulate them here, and the pump
@@ -95,10 +97,19 @@ static int _sonos_write_frames(frames_t out_frames, bool silence, s32_t gainL, s
     return (int)out_frames;
 }
 
-uint32_t get_sb_time_ms(void)
+uint64_t get_sb_time_ms(void)
 {
-    uint32_t now = gettime_ms();
-    return now ? now : 0;
+    struct timespec ts;
+    if (!clock_gettime(CLOCK_MONOTONIC, &ts))
+        return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+int sonos_output_running(void)
+{
+    return atomic_load(&pump_running);
 }
 
 // Derives output.device_frames from the Sonos device's own reported playback
@@ -124,7 +135,7 @@ static void* run_pump_thread(void* arg)
 {
     (void)arg;
 
-    while (pump_running) {
+    while (atomic_load(&pump_running)) {
         LOCK;
 
         output.updated = gettime_ms();
@@ -204,7 +215,13 @@ void output_init_sonos(log_level level, unsigned output_buf_size, char* params, 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN + OUTPUT_THREAD_STACK_SIZE);
-    pthread_create(&pump_thread, &attr, run_pump_thread, NULL);
+    atomic_store(&pump_running, true);
+    int err = pthread_create(&pump_thread, &attr, run_pump_thread, NULL);
+    pump_started = err == 0;
+    if (err) {
+        atomic_store(&pump_running, false);
+        LOG_ERROR("unable to start output pump: %s", strerror(err));
+    }
     pthread_attr_destroy(&attr);
 }
 
@@ -212,11 +229,14 @@ void output_close_sonos(void)
 {
     LOG_INFO("close output");
 
-    LOCK;
-    pump_running = false;
-    UNLOCK;
-
+    atomic_store(&pump_running, false);
+    if (pump_started) {
+        pthread_join(pump_thread, NULL);
+        pump_started = false;
+    }
     free(pcm_staging);
+    pcm_staging = NULL;
+    pcm_staged_frames = 0;
 
     output_close_common();
 }

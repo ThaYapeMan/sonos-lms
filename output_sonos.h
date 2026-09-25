@@ -18,8 +18,11 @@
 // every output_init_<backend>() implementation.
 void output_init_sonos(log_level level, unsigned output_buf_size, char* params, unsigned rates[], unsigned rate_delay);
 
-// Stops the pump thread and releases the backend's resources.
+// Signals and joins the pump thread before releasing the backend's resources.
 void output_close_sonos(void);
+
+// Lets encoder/GET waits leave promptly during pump shutdown.
+int sonos_output_running(void);
 
 // Allocates a fresh stream id for the encoder, marking a track boundary.
 void new_squeezebox_stream_id(void);

@@ -9,16 +9,68 @@
 
 static std::atomic<unsigned> generation(1);
 static std::atomic<bool> paused(false);
+static std::atomic<uint64_t> fakeClock(0);
 extern "C" unsigned get_squeezebox_stream_id() { return generation.load(); }
 extern "C" int sonos_lms_is_paused() { return paused.load(); }
-extern "C" uint32_t get_sb_time_ms()
+extern "C" uint64_t get_sb_time_ms()
 {
+    if (fakeClock.load()) return fakeClock.load();
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+namespace SONOS {
+struct EncoderTestAccess {
+    static void seed(SBEncoder& encoder, uint64_t bytes) {
+        encoder.m_pcmBytesAccepted = bytes;
+        encoder.m_firstReadAtMs = 1;
+    }
+    static uint64_t bytes(const SBEncoder& encoder) { return encoder.m_pcmBytesAccepted; }
+};
+}
+
+static void counterAndShutdownTests() {
+    SONOS::SBEncoder encoder(1);
+    assert(encoder.open());
+    char pcm[4] = {};
+    const uint64_t boundary = uint64_t(1) << 32;
+    SONOS::EncoderTestAccess::seed(encoder, boundary - 4);
+    fakeClock = boundary / 4 * 1000 / 44100 + 1;
+    unsigned anchors = 0;
+    auto anchor = [&] { ++anchors; };
+    assert(encoder.write(pcm, 4, 10, anchor) == 4);
+    assert(SONOS::EncoderTestAccess::bytes(encoder) == boundary);
+    assert(encoder.write(pcm, 4, 10, anchor) == 4);
+    assert(SONOS::EncoderTestAccess::bytes(encoder) == boundary + 4 && anchors == 0);
+    // Pacing time must also remain 64-bit, beyond the old 49-day ms wrap.
+    const uint64_t bytes = (boundary + 2000) * 44100 / 1000 * 4;
+    const uint64_t elapsed = bytes / 4 * 1000 / 44100;
+    SONOS::EncoderTestAccess::seed(encoder, bytes);
+    fakeClock = elapsed - 1000 + 1;
+    assert(encoder.write(pcm, 4, 5, anchor) == 0); // still a second ahead
+    fakeClock = elapsed + 1;
+    assert(encoder.write(pcm, 4, 10, anchor) == 4 && anchors == 0);
+    fakeClock = 0;
+    std::cout << "PASS: PCM counter crosses 2^32 without re-anchoring; pacing remains 64-bit beyond 49 days\n";
+
+    SONOS::SBEncoder waiting(1);
+    assert(waiting.open());
+    paused = true;
+    std::atomic<bool> stopping(false);
+    auto writer = std::async(std::launch::async, [&] {
+        return waiting.write(pcm, 4, 0, {}, [&] { return stopping.load(); });
+    });
+    assert(writer.wait_for(std::chrono::milliseconds(30)) == std::future_status::timeout);
+    stopping = true;
+    assert(writer.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    assert(writer.get() == 0);
+    paused = false;
+    std::cout << "PASS: shutdown interrupts an encoder write held indefinitely by pause\n";
+}
+
 int main()
 {
+    counterAndShutdownTests();
     SONOS::SBEncoder old(1);
     char data[16384];
     assert(old.open());

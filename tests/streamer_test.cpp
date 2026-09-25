@@ -17,7 +17,8 @@
 
 using namespace SONOS;
 static std::atomic<unsigned> generation(1), resumeCommands(0), sameURLRequests(0);
-static std::atomic<bool> paused(false);
+static std::atomic<bool> paused(false), outputRunning(true);
+extern "C" int sonos_output_running() { return outputRunning.load(); }
 static std::mutex stateMutex;
 static ResumeState state;
 static std::string deviceState = "PLAYING";
@@ -27,7 +28,7 @@ static std::chrono::steady_clock::time_point resumeAt;
 extern "C" unsigned get_lms_stream_serial() { return generation.load(); }
 extern "C" unsigned get_squeezebox_stream_id() { return generation.load(); }
 extern "C" int sonos_lms_is_paused() { return paused.load(); }
-extern "C" uint32_t get_sb_time_ms() {
+extern "C" uint64_t get_sb_time_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -236,6 +237,15 @@ static void stopPauseStreamTest() {
 }
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "shutdown") {
+        paused = true;
+        auto producer = std::async(std::launch::async, [] { feed(2300); });
+        assert(producer.wait_for(std::chrono::milliseconds(30)) == std::future_status::timeout);
+        outputRunning = false;
+        ready(producer);
+        puts("PASS: output shutdown releases a producer waiting for a GET while paused");
+        return 0;
+    }
     if (argc > 1 && std::string(argv[1]) == "position") {
         SBStreamer broker;
         Socket initial(1), resumed(1), track(2);

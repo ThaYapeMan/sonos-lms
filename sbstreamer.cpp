@@ -82,6 +82,7 @@ extern std::string SqueezeBoxURL(unsigned current);
 extern "C" unsigned get_squeezebox_stream_id(void);
 extern "C" unsigned get_lms_stream_serial(void);
 extern "C" int sonos_lms_is_paused(void);
+extern "C" int sonos_output_running(void);
 
 extern "C" {
 // Signal only the HTTP lifetime. Its worker sends EOF and retains the encoder
@@ -131,7 +132,7 @@ void encode_squeezebox_audio(const char* data, int len, uint64_t firstFrame)
     unsigned stream = get_squeezebox_stream_id();
     unsigned serial = get_lms_stream_serial();
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (stream == get_squeezebox_stream_id() && serial == get_lms_stream_serial()) {
+    while (sonos_output_running() && stream == get_squeezebox_stream_id() && serial == get_lms_stream_serial()) {
         std::shared_ptr<SBEncoder> enc;
         uint64_t requestId = 0;
         {
@@ -142,8 +143,8 @@ void encode_squeezebox_audio(const char* data, int len, uint64_t firstFrame)
         if (enc && enc->streamId() == stream && !enc->cancelled() && !enc->responseEnded() && !enc->producerRetired()) {
             int written = enc->write(data, len, SBSTREAMER_TIMEOUT, [=] {
                 sonos_position_pcm(stream, requestId, firstFrame);
-            });
-            if (written == len) return;
+            }, [] { return !sonos_output_running(); });
+            if (written == len || !sonos_output_running()) return;
             // Active-request termination or resume may replace the encoder
             // while write waits. Retry the SAME PCM block on the new encoder.
             if (!enc->cancelled() && !enc->responseEnded() && !enc->producerRetired()) {
