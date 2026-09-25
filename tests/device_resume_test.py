@@ -22,10 +22,6 @@ def production_function(signature):
 # supplies only external state, network calls, and status/HTTP observations.
 bodies = "\n\n".join(production_function(signature) for signature in (
     "static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition)\n",
-    "static void logFeedRestartCancellation(",
-    "static void cancelFeedRestart(",
-    "static void observeFeedRestart(",
-    "static void dispatchFeedRestart(",
     'extern "C" void new_squeezebox_stream_id(',
     "static void dispatchDeferredStop(",
     'extern "C" void sonos_lms_transport(',
@@ -42,13 +38,6 @@ with tempfile.TemporaryDirectory(prefix="sonos-device-resume-") as directory:
         "-I", str(directory), str(ROOT / "tests/device_resume_fixture.cpp"),
         "-o", str(executable), "-lpthread",
     ], check=True)
-    for mode in ("sameurl-503", "sameurl-close", "sameurl-empty200", "playonly", "playonly-frames", "feed-restart", "unknown"):
+    for mode in ("stop", "pause"):
         subprocess.run([str(executable)], check=True,
-                       env={**os.environ, "SONOS_SQUEEZEBOX_DEVICE_RESUME": mode})
-
-    for mode in ("feed-restart", "playonly-frames", "sameurl-close", "playonly"):
-        subprocess.run([str(executable)], check=True,
-                       env={**os.environ, "SONOS_SQUEEZEBOX_PAUSE": "stop",
-                            "SONOS_SQUEEZEBOX_DEVICE_RESUME": mode,
-                            "SONOS_SQUEEZEBOX_RESUME_BODY": "frames",
-                            "SONOS_SQUEEZEBOX_RESUME_TRANSFER": "raw"})
+                       env={**os.environ, "SONOS_SQUEEZEBOX_PAUSE": mode})

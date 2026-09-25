@@ -9,8 +9,6 @@ attic
 /streamer-test
 !scripts/*.sh
 
-/flac-metadata-test
 
-/feed-restart-test
 
 /position-test

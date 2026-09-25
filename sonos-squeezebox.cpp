@@ -18,9 +18,7 @@
 #include <sonossystem.h>
 
 #include "resume_state.h"
-#include "device_resume.h"
-#include "resume_response.h"
-#include "feed_restart.h"
+#include "pause_mode.h"
 #include "sbstreamer.h"
 #include "sonos-position.h"
 #include "sonos-status.h"
@@ -82,85 +80,15 @@ extern "C" int squeezebox_response_ended(unsigned stream);
 extern "C" int squeezebox_response_open(unsigned stream);
 extern "C" void acknowledge_squeezebox_resume(unsigned stream);
 extern "C" void invalidate_squeezebox_held_get(unsigned stream);
-extern "C" void prepare_squeezebox_frames_resume(unsigned stream);
-extern "C" void prepare_squeezebox_feed_restart_resume(unsigned stream);
 static std::mutex stopMutex;
 static StopDebounce deferredStop;
 static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition);
-
-static std::mutex feedRestartMutex;
-static FeedRestartWatch feedRestartWatch;
-
-static void logFeedRestartCancellation(const char* reason)
-{
-    if (!reason) return;
-    if (!std::strcmp(reason, "speaker kept playing"))
-        printf("device resume: speaker kept playing, no restart\n");
-    else
-        printf("device resume: feed-restart skipped: %s\n", reason);
-}
-
-static void cancelFeedRestart(const char* reason)
-{
-    if (deviceResumeStrategy() != DeviceResume::FeedRestart) return;
-    std::lock_guard<std::mutex> lock(feedRestartMutex);
-    logFeedRestartCancellation(feedRestartWatch.cancel(reason));
-}
-
-static void observeFeedRestart(const std::string& state)
-{
-    if (deviceResumeStrategy() != DeviceResume::FeedRestart) return;
-    std::lock_guard<std::mutex> lock(feedRestartMutex);
-    logFeedRestartCancellation(feedRestartWatch.observe(state, streamId.load(), FeedRestartWatch::Clock::now()));
-}
-
-// Invoked by the feed-restart worker only. No sleep or network I/O while
-// holding the watch mutex; p/q/s and device pause can cancel a pending retry.
-static void dispatchFeedRestart()
-{
-    unsigned requested;
-    unsigned long long token;
-    {
-        std::lock_guard<std::mutex> lock(feedRestartMutex);
-        if (!feedRestartWatch.active()) return;
-        auto now = FeedRestartWatch::Clock::now();
-        logFeedRestartCancellation(feedRestartWatch.check(streamId.load(), now));
-        if (!feedRestartWatch.active()) return;
-        if (gPlayer)
-            logFeedRestartCancellation(feedRestartWatch.observe(
-                gPlayer->GetTransportProperty().TransportState, streamId.load(), now));
-        if (!feedRestartWatch.ready(now)) return;
-        requested = feedRestartWatch.stream();
-        token = feedRestartWatch.token();
-    }
-    std::unique_lock<std::mutex> transport(transportMutex, std::try_to_lock);
-    if (!transport.owns_lock()) return; // worker retries after 10 ms, for up to 3 s
-    long long elapsed;
-    {
-        std::lock_guard<std::mutex> lock(feedRestartMutex);
-        auto now = FeedRestartWatch::Clock::now();
-        logFeedRestartCancellation(feedRestartWatch.check(streamId.load(), now));
-        if (!feedRestartWatch.ready(now) || feedRestartWatch.token() != token) return;
-        if (lmsPaused.load()) {
-            logFeedRestartCancellation(feedRestartWatch.cancel("LMS pause"));
-            return;
-        }
-        if (stream_just_restarted() || !gPlayer) return;
-        elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - feedRestartWatch.stoppedAt()).count();
-        feedRestartWatch.claim();
-    }
-    printf("device resume: speaker STOPPED after resume -> same-URL restart after %lldms\n", elapsed);
-    printf("device resume: feed-restart -> PlayStream(same URL)\n");
-    if (!PlaySqueezeBoxLocked(requested, false))
-        printf("device resume: feed-restart same-URL restart failed\n");
-}
 
 extern "C" unsigned get_squeezebox_stream_id(void) { return streamId.load(); }
 extern "C" void new_squeezebox_stream_id(void)
 {
     unsigned id = streamId.fetch_add(1) + 1;
     reset_sonos_position(id);
-    cancelFeedRestart("stream id changed");
     {
         std::lock_guard<std::mutex> lock(resumeMutex);
         resumeState.streamStarted();
@@ -170,9 +98,6 @@ extern "C" void new_squeezebox_stream_id(void)
 
 extern "C" void sonos_lms_transport(char command)
 {
-    if (command == 'p') cancelFeedRestart("LMS strm p");
-    else if (command == 'q') cancelFeedRestart("LMS strm q");
-    else if (command == 's') cancelFeedRestart("LMS strm s");
     if (command == 's' || command == 'p' || command == 'u') {
         std::lock_guard<std::mutex> lock(stopMutex);
         bool pending = deferredStop.cancel();
@@ -217,66 +142,9 @@ extern "C" void sonos_lms_transport(char command)
         printf("strm u: new stream pending from strm s, no same-URL resume\n");
         return; // decoded track boundary allocates the ID and calls PlaySqueezeBox
     }
-    bool feedRestart = responseOpen && unpause == ResumeState::Unpause::SameURL
-        && deviceResumeStrategy() == DeviceResume::FeedRestart
-        && squeezebox_response_open(streamId.load());
-    if (feedRestart) {
-        prepare_squeezebox_feed_restart_resume(streamId.load());
-        {
-            std::lock_guard<std::mutex> lock(feedRestartMutex);
-            feedRestartWatch.arm(streamId.load(), FeedRestartWatch::Clock::now());
-        }
-        printf("device resume: strategy=feed-restart feeding Sonos's own GET\n");
-        unpause = ResumeState::Unpause::FeedHeldGet;
-    }
-    bool playOnly = responseOpen && unpause == ResumeState::Unpause::SameURL
-        && isPlayOnly(deviceResumeStrategy())
-        && squeezebox_response_open(streamId.load());
-    if (unpause == ResumeState::Unpause::SameURL)
-        printf("device resume: strategy=%s stream=%u action=%s\n",
-            deviceResumeName(deviceResumeStrategy()), streamId.load(),
-            playOnly ? "Play and feed held GET" : "SameURL");
-    if (playOnly) {
-        if (deviceResumeStrategy() == DeviceResume::PlayOnlyFrames)
-            prepare_squeezebox_frames_resume(streamId.load());
-        unpause = ResumeState::Unpause::FeedHeldGet;
-    }
     if (unpause == ResumeState::Unpause::FeedHeldGet) {
         printf("strm u: feeding held GET, no same-URL resume\n");
         acknowledge_squeezebox_resume(streamId.load());
-        if (playOnly) {
-            auto dispatched = std::chrono::steady_clock::now();
-            unsigned requestedStream = streamId.load();
-            // The Play reply may wait for audio: let process_strm release PCM now.
-            std::thread([dispatched, requestedStream] {
-                const auto deadline = dispatched + std::chrono::seconds(3);
-                for (;;) {
-                    if (streamId.load() != requestedStream) {
-                        printf("device resume: strategy=%s Play() skipped: stream changed\n",
-                            deviceResumeName(deviceResumeStrategy()));
-                        return;
-                    }
-                    if (std::chrono::steady_clock::now() >= deadline) {
-                        printf("device resume: strategy=%s Play() skipped: 3 s expired\n",
-                            deviceResumeName(deviceResumeStrategy()));
-                        return;
-                    }
-                    {
-                        std::unique_lock<std::mutex> lock(transportMutex, std::try_to_lock);
-                        if (lock.owns_lock() && streamId.load() == requestedStream
-                            && !stream_just_restarted() && gPlayer) {
-                            bool ok = gPlayer->Play();
-                            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now() - dispatched).count();
-                            printf("device resume: strategy=%s Play() %s after %lldms\n",
-                                deviceResumeName(deviceResumeStrategy()), ok ? "sent" : "failed", (long long)elapsed);
-                            return;
-                        }
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                }
-            }).detach();
-        }
         return; // process_strm releases PCM into the existing encoder
     }
     if (command == 'q') {
@@ -565,7 +433,6 @@ std::string SqueezeBoxURL(unsigned stream_id)
 
 static void ObserveDeviceTransport(const std::string& state)
 {
-    observeFeedRestart(state);
     bool relay;
     {
         std::lock_guard<std::mutex> lock(resumeMutex);
@@ -581,8 +448,8 @@ static void ObserveDeviceTransport(const std::string& state)
 }
 
 // Called while a current-ID GET waits for PCM. A probe/reconnect is not itself
-// a resume: require observed PAUSED -> PLAYING/TRANSITIONING and strm p without
-// a subsequent strm u. Poll cached device state because GET and event callbacks
+// a resume: require an observed pause (PAUSED or Stop-for-pause STOPPED)
+// followed by PLAYING/TRANSITIONING, and strm p without a subsequent strm u. Poll cached device state because GET and event callbacks
 // can arrive in either order. Do not hold transportMutex across LMS CLI I/O:
 // the resulting strm u feeds the held GET without another device command.
 void ResumeSqueezeBox(unsigned requested)
@@ -875,8 +742,6 @@ int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     (void)pauseMode();
-    (void)deviceResumeStrategy();
-    (void)resumeResponseSettings();
 
     int debugLevel = findFlag(argc, argv, "--debug") ? 4 : 0;
     const char* ip = findOption(argc, argv, "--ip");
@@ -933,10 +798,6 @@ int main(int argc, char** argv)
     }
 
     static StopTimer stopTimer;
-    std::unique_ptr<FeedRestartWorker> feedRestartWorker;
-    if (deviceResumeStrategy() == DeviceResume::FeedRestart)
-        feedRestartWorker.reset(new FeedRestartWorker(dispatchFeedRestart));
-
     std::thread* squeezeliteThread = nullptr;
     if (filename) {
         playLocalFileOnce(filename);

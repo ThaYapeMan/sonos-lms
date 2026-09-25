@@ -195,6 +195,25 @@ header for `audio/flac` requests, and injecting the blocks anyway just corrupts
 the stream (`ERROR_CORRUPT_FILE`). Track title and artwork are therefore only ever
 set once, at stream start.
 
+## Pause and resume on Sonos
+
+Pausing ends the HTTP response and sends UPnP **Stop** by default. Sonos resumes
+FLAC radio (`x-rincon-mp3radio` with `audio/flac`) incorrectly from PAUSED:
+the first Play can close the GET with ERROR_CORRUPT_FILE and an app dialog.
+A plain native-FLAC relay reproduced the pause/resume failure independently of
+the bridge. Stopping after pause made all three reference resumes play cleanly;
+the bridge's Stop mode was physically verified on 2026-09-25 with status OK,
+continued audio, and no dialog.
+
+The app still shows Play. Its fresh GET receives a normal FLAC header and
+chunked audio when LMS resumes; an LMS resume without a GET reissues the same
+URL. Each connection's RelTime is anchored to its first PCM's track offset so
+LMS position continues across reconnects. The deferred `strm q` path is unchanged.
+No environment overrides are needed. `SONOS_SQUEEZEBOX_PAUSE=pause` remains an
+explicit fallback to UPnP Pause and the previous same-URL resume behavior
+(including HTTP 503 for a speculative held GET). The pause switch is read and
+logged once at startup; invalid values warn and use `stop`.
+
 ## Related
 
 [philippe44/LMS-uPnP](https://github.com/philippe44/LMS-uPnP) takes the opposite
@@ -210,90 +229,3 @@ GPL-compatible outbound license -- no additional, more restrictive terms (e.g. a
 noncommercial clause) can be layered on top.
 
 Copyright (C) 2026 Jaap van Vliet
-
-### Diagnostics
-
-`SONOS_SQUEEZEBOX_DEVICE_RESUME` is a temporary device-test switch, read and
-logged once at startup. `sameurl-503` (default) retains the existing same-URL
-resume and cancelled held-GET 503 response. `sameurl-close` disconnects a
-cancelled GET without audio or HTTP bytes; `sameurl-empty200` sends streaming
-200 headers and an empty chunked body. `playonly` keeps an open held GET,
-feeds it immediately, and dispatches one UPnP Play from a detached thread. That
-thread retries the transport lock every 10 ms for up to three seconds, skipping
-if the stream changes or the deadline expires. Without an open GET it falls
-back to the same-URL path.
-
-`playonly-frames` uses the same resume and Play retry path, but strips the
-`fLaC` marker and all FLAC metadata blocks from only the held GET selected by a
-device-initiated resume. Its HTTP body starts at the first audio frame. Initial
-playback, ordinary LMS unpause, PlayStream, and other GETs (including promoted
-standbys) retain fresh FLAC headers. It logs `stream N: playonly-frames: skipped
-<n> metadata bytes`. This tests whether Sonos resumes its existing decoder:
-on 2026-09-24 at 17:14, all four tested `playonly` resumes rejected fresh FLAC
-metadata with a HEAD request, GET closure, and `ERROR_CORRUPT_FILE` / `STOPPED`.
-This decoder-continuation hypothesis is superseded by the MP3 reference finding
-below. The mode remains available for comparison.
-
-`SONOS_SQUEEZEBOX_PAUSE=pause|stop` selects how LMS `strm p` pauses the
-speaker (default `pause`). The value is read and logged once at startup;
-invalid values warn and use `pause`. With `stop`, the bridge ends the HTTP
-response first, then sends UPnP Stop and logs `strm p -> UPnP Stop (pause=stop)`.
-This also applies to the LMS pause relayed from a Sonos-app pause. The deferred
-400 ms `strm q` path continues to use Pause.
-
-Stop-for-pause is remembered for the current stream. STOPPED is idle in that
-state: it sends nothing to LMS and does not restart playback. A subsequent
-STOPPED → TRANSITIONING/PLAYING is a device resume: the bridge asks LMS to play
-and feeds Sonos's fresh GET with normal chunked FLAC, including its header.
-An LMS unpause without an open GET uses PlayStream with the same URL. The marker
-clears on a new stream, `strm s/q`, or resumed PLAYING; it is not persisted.
-
-With `pause=stop`, DEVICE_RESUME strategies are ignored (logged once if set),
-and RESUME_BODY/RESUME_TRANSFER do not alter the fresh resume GET. For physical
-testing, remove those experiment settings and use only
-`Environment="SONOS_SQUEEZEBOX_PAUSE=stop"` in the service drop-in. This avoids
-resuming a PAUSED FLAC radio decoder by leaving the speaker STOPPED instead.
-
-`feed-restart` keeps and feeds Sonos's own device-resume GET with normal FLAC
-metadata by default, without invalidation, a server-induced close, PlayStream, or Play at
-that point. It logs `device resume: strategy=feed-restart feeding Sonos's own
-GET`. A one-shot, five-second watch then observes transport state. STOPPED
-schedules one same-URL PlayStream restart after 200 ms; the transport lock is
-retried every 10 ms for up to three seconds, bounded also by the watch deadline.
-Two continuous seconds of PLAYING disarm it without restarting. Stream changes,
-LMS `p/q/s`, a new device pause, and deadline expiry cancel it with a reason.
-Without an open held GET, the existing SameURL path is used.
-
-The reference radio test on 2026-09-24 used MP3 through a transparent relay with
-the bridge stopped and the same `x-rincon-mp3radio` UPnP setup. In three rounds,
-Sonos's first resume GET received data, issued HEAD 11–13 ms later, closed from
-the client side, and reported STOPPED/OK; the next GET played. The bridge's
-`playonly` trace likewise showed client closure and silence without a reported
-dialog, whereas `sameurl-close` recovered playback but produced a dialog in all
-three rounds. `feed-restart` tests letting Sonos finish that first attempt
-itself before automatically restarting. The later feed-restart test restored
-playback but still reported ERROR_CORRUPT_FILE and an iOS dialog. Its resume
-response used chunked encoding and fresh FLAC metadata; the reference used raw
-MP3 with connection-close framing. These differences motivate two independent
-experiments, not a confirmed explanation of the dialog. Raw evidence stays
-local in `logs/`.
-
-With `feed-restart`, two switches affect only the held GET selected for device
-resume, before PCM is released:
-
-- `SONOS_SQUEEZEBOX_RESUME_BODY=header|frames` (default `header`): send fresh FLAC
-  metadata, or strip the `fLaC` marker and metadata blocks and start at the first
-  audio frame using the same parser as `playonly-frames`.
-- `SONOS_SQUEEZEBOX_RESUME_TRANSFER=chunked|raw` (default `chunked`): use current
-  chunked framing, or write the body directly with `Connection: close` and
-  neither Transfer-Encoding nor Content-Length.
-
-Both switches are read and logged once at startup; invalid values warn and use
-their defaults. Each selected request logs `resume GET #id body=<value>
-transfer=<value>`. Initial GETs, promoted standbys, the automatic restart GET,
-and other strategies retain their existing response formats. Test frames/raw,
-header/raw, and frames/chunked separately to distinguish the two effects.
-
-Unknown values warn and use `sameurl-503`. The uncancelled five-second no-audio
-timeout returns 503 in every mode. Each application logs `device resume:
-strategy=<mode>`. Physical Sonos verification is still required.

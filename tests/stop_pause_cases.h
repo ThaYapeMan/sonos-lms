@@ -3,11 +3,9 @@ static void stopPauseCases() {
     auto pause = [] {
         resumeState = ResumeState{};
         deferredStop = StopDebounce{};
-        feedRestartWatch = FeedRestartWatch{};
         responseOpen = true; responseEnded = false;
         cliPlays = cliPauses = pauseCalls = stopCalls = responseEnds = 0;
         streamPlays = transportPlays = heldGetInvalidations = 0;
-        framesResumeMarks = feedResumeMarks = 0;
         callOrder.clear();
         resumeState.command('s'); resumeState.observe("PLAYING");
         sonos_lms_transport('p');
@@ -16,9 +14,7 @@ static void stopPauseCases() {
         player.property = {"STOPPED", "OK"};
         ObserveDeviceTransport("STOPPED");
         ResumeSqueezeBox(6);
-        dispatchFeedRestart();
         assert(cliPlays == 0 && cliPauses == 0 && streamPlays == 0 && transportPlays == 0);
-        assert(!feedRestartWatch.active());
     };
     for (const char* state : {"TRANSITIONING", "PLAYING"}) {
         pause();
@@ -29,11 +25,10 @@ static void stopPauseCases() {
         sonos_lms_transport('u');
         assert(responseOpen && !lmsPaused && !responseEnded);
         assert(streamPlays == 0 && transportPlays == 0 && heldGetInvalidations == 0);
-        assert(framesResumeMarks == 0 && feedResumeMarks == 0);
         ObserveDeviceTransport("PLAYING");
         assert(!resumeState.stoppedForPause(6));
     }
-    puts("PASS: pause sends Stop after EOF; STOPPED is ignored; fresh GET after STOPPED resumes LMS once without experimental strategies");
+    puts("PASS: pause sends Stop after EOF; STOPPED is ignored; fresh GET after STOPPED resumes LMS once without a second device command");
     pause();
     sonos_lms_transport('u'); // LMS resume without an open GET
     assert(streamPlays == 1 && transportPlays == 0);
