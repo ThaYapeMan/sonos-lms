@@ -22,17 +22,37 @@
 
 #include "sonos-position.h"
 
-#include <atomic>
-#include <cstdint>
+#include "position_state.h"
+#include <chrono>
+#include <mutex>
 
-static std::atomic<uint32_t> g_sonos_position_ms{0};
-
-void set_sonos_position_ms(uint32_t ms)
-{
-    g_sonos_position_ms.store(ms, std::memory_order_relaxed);
+static std::mutex positionMutex;
+static ConnectionPosition position;
+static uint64_t positionNow() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
-
-uint32_t get_sonos_position_ms(void)
-{
-    return g_sonos_position_ms.load(std::memory_order_relaxed);
+void reset_sonos_position(unsigned stream) {
+    std::lock_guard<std::mutex> lock(positionMutex);
+    position.reset(stream);
+}
+void sonos_position_connection(unsigned stream, uint64_t request) {
+    std::lock_guard<std::mutex> lock(positionMutex);
+    position.connection(stream, request, positionNow());
+}
+void sonos_position_pcm(unsigned stream, uint64_t request, uint64_t firstFrame) {
+    std::lock_guard<std::mutex> lock(positionMutex);
+    position.pcm(stream, request, firstFrame, positionNow());
+}
+uint64_t sonos_position_poll_token(void) {
+    std::lock_guard<std::mutex> lock(positionMutex);
+    return position.token();
+}
+void set_sonos_position_ms(uint64_t token, uint32_t ms) {
+    std::lock_guard<std::mutex> lock(positionMutex);
+    position.poll(token, ms, positionNow());
+}
+uint64_t get_sonos_position_frames(uint32_t rate) {
+    std::lock_guard<std::mutex> lock(positionMutex);
+    return position.frames(rate);
 }

@@ -43,7 +43,8 @@ public:
 
     // Blocks (up to timeout ms, 0 = forever) until len bytes of PCM have
     // been accepted into the encoder, or the stream ends/is cancelled.
-    int write(const char* data, int len, unsigned timeout);
+    int write(const char* data, int len, unsigned timeout,
+        const std::function<void()>& firstPcm = {});
 
     // Blocks (up to timeout ms, 0 = forever) until some encoded FLAC bytes
     // are available, or the stream ends/is cancelled. While holdWhilePaused

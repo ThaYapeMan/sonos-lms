@@ -26,11 +26,13 @@
 extern "C" {
 #endif
 
-// Actual Sonos playback position polled via UPnP AVTransport GetPositionInfo.
-// Written by the main loop (C++), read by the output thread (C).
-// Returns 0 when unknown (before first successful poll or at stream start).
-uint32_t get_sonos_position_ms(void);
-void set_sonos_position_ms(uint32_t ms);
+// All shared connection/PCM/poll state is protected by one mutex in C++.
+void reset_sonos_position(unsigned stream);
+void sonos_position_connection(unsigned stream, uint64_t request);
+void sonos_position_pcm(unsigned stream, uint64_t request, uint64_t first_frame);
+uint64_t sonos_position_poll_token(void);
+void set_sonos_position_ms(uint64_t token, uint32_t ms);
+uint64_t get_sonos_position_frames(uint32_t sample_rate);
 
 #ifdef __cplusplus
 }

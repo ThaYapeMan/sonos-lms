@@ -259,7 +259,7 @@ int SBEncoder::read(char* data, int maxlen, unsigned timeout, bool holdWhilePaus
     }
 }
 
-int SBEncoder::write(const char* data, int len, unsigned timeout)
+int SBEncoder::write(const char* data, int len, unsigned timeout, const std::function<void()>& firstPcm)
 {
     const bool limited = timeout != 0;
 
@@ -293,6 +293,7 @@ int SBEncoder::write(const char* data, int len, unsigned timeout)
             std::lock_guard<std::mutex> lock(m_writeMutex);
             if (cancelled() || responseEnded() || producerRetired() || m_phase != Phase::Encoding)
                 return 0;
+            if (!m_pcmBytesAccepted && firstPcm) firstPcm();
             m_pcmBytesAccepted += len;
             return encodePcm(data, len);
         }

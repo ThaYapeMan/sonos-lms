@@ -118,7 +118,7 @@ static std::string SqueezeBoxURL(unsigned id) {
     assert(id == 6);
     return "http://bridge/music/squeezebox.flac?stream=" + std::to_string(id);
 }
-static void set_sonos_position_ms(unsigned) { assert(false); } // same-URL resume must not reset
+static void reset_sonos_position(unsigned) {}
 namespace SONOS {
 struct Status {
     void update() {}

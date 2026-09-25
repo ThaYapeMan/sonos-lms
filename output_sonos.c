@@ -27,7 +27,7 @@ extern struct buffer* outputbuf;
 #define LOCK mutex_lock(outputbuf->mutex)
 #define UNLOCK mutex_unlock(outputbuf->mutex)
 
-void encode_squeezebox_audio(const char* data, int len);
+void encode_squeezebox_audio(const char* data, int len, uint64_t first_frame);
 
 static log_level loglevel;
 static thread_type pump_thread;
@@ -38,6 +38,7 @@ static volatile bool pump_running = true;
 // thread drains the batch out to the encoder once per loop iteration.
 static u8_t* pcm_staging;
 static unsigned pcm_staged_frames;
+static uint64_t pcm_first_frame;
 static int frame_size_bytes;
 
 static bool backend_was_silent = true;
@@ -85,6 +86,7 @@ static int _sonos_write_frames(frames_t out_frames, bool silence, s32_t gainL, s
     if (output.fade == FADE_ACTIVE && output.fade_dir == FADE_CROSS && *cross_ptr)
         _apply_cross(outputbuf, out_frames, cross_gain_in, cross_gain_out, cross_ptr);
 
+    if (!pcm_staged_frames) pcm_first_frame = output.frames_played;
     u8_t* decoded = outputbuf->readp;
     _scale_and_pack_frames(pcm_staging + pcm_staged_frames * frame_size_bytes,
         (s32_t*)(void*)decoded, out_frames, FIXED_ONE, FIXED_ONE, 0, output.format);
@@ -113,13 +115,7 @@ static void update_device_frames_from_sonos_position(void)
     }
 
     u32_t sample_rate = output.current_sample_rate;
-    u32_t sonos_ms = get_sonos_position_ms();
-    if (sonos_ms == 0 || sample_rate == 0) {
-        output.device_frames = 0;
-        return;
-    }
-
-    u64_t sonos_frames = (u64_t)sonos_ms * sample_rate / 1000;
+    u64_t sonos_frames = get_sonos_position_frames(sample_rate);
     u64_t decoded_frames = (u64_t)output.frames_played_dmp;
     output.device_frames = (decoded_frames > sonos_frames) ? (u32_t)(decoded_frames - sonos_frames) : 0;
 }
@@ -152,7 +148,7 @@ static void* run_pump_thread(void* arg)
         UNLOCK;
 
         if (pcm_staged_frames) {
-            encode_squeezebox_audio((const char*)pcm_staging, pcm_staged_frames * frame_size_bytes);
+            encode_squeezebox_audio((const char*)pcm_staging, pcm_staged_frames * frame_size_bytes, pcm_first_frame);
             pcm_staged_frames = 0;
         }
 

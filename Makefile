@@ -40,7 +40,7 @@ sonos-squeezebox: $(OBJS) $(OBJS_SL) noson/noson/libnoson.a
 		-lpthread -lm -lrt -ldl -lasound
 
 clean:
-	rm -f *.o squeezelite/*.o sonos-squeezebox encoder-test resume-state-test streamer-test flac-metadata-test feed-restart-test
+	rm -f *.o squeezelite/*.o sonos-squeezebox position-test encoder-test resume-state-test streamer-test flac-metadata-test feed-restart-test
 
 slimproto_sonos.o: slimproto_sonos.c squeezelite/slimproto.c squeezelite/squeezelite.h
 
@@ -50,7 +50,9 @@ install:
 encoder-test: tests/encoder_test.cpp sbencoder.cpp sbencoder.h noson/noson/libnoson.a
 	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -o $@ tests/encoder_test.cpp sbencoder.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
 
-test: encoder-test resume-state-test streamer-test flac-metadata-test feed-restart-test
+test: position-test encoder-test resume-state-test streamer-test flac-metadata-test feed-restart-test
+	./position-test
+	./streamer-test position
 	./encoder-test
 	./feed-restart-test
 	./flac-metadata-test
@@ -75,7 +77,7 @@ resume-state-test: tests/resume_state_test.cpp resume_state.h stop_debounce.h
 	g++ -g -O2 -Wall -I. -o $@ tests/resume_state_test.cpp
 
 streamer-test: device_resume.h tests/streamer_test.cpp sbstreamer.cpp sbstreamer.h sbencoder.cpp sbencoder.h resume_state.h noson/noson/libnoson.a
-	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -o $@ tests/streamer_test.cpp sbstreamer.cpp sbencoder.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
+	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -o $@ tests/streamer_test.cpp sbstreamer.cpp sbencoder.cpp sonos-position.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
 
 sbstreamer.o streamer-test: flac_metadata.h
 flac-metadata-test: tests/flac_metadata_test.cpp flac_metadata.h sbencoder.cpp sbencoder.h noson/noson/libnoson.a
@@ -88,3 +90,9 @@ feed-restart-test: tests/feed_restart_test.cpp feed_restart.h
 sonos-squeezebox.o sbstreamer.o streamer-test: resume_response.h
 
 sonos-squeezebox.o sbstreamer.o streamer-test: pause_mode.h
+
+position-test: tests/position_test.cpp position_state.h
+	g++ -g -O2 -Wall -I. -o $@ tests/position_test.cpp
+sonos-position.o: position_state.h sonos-position.h
+output_sonos.o sonos-squeezebox.o sbstreamer.o streamer-test: sonos-position.h
+streamer-test: sonos-position.cpp position_state.h

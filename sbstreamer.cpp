@@ -22,6 +22,7 @@
 #include "private/socket.h"
 #include <sys/socket.h>
 #include "sbencoder.h"
+#include "sonos-position.h"
 #include "device_resume.h"
 #include "flac_metadata.h"
 #include "resume_response.h"
@@ -75,6 +76,7 @@ static void activateRequest(const std::shared_ptr<StreamRequest>& request, bool 
 {
     request->encoder = std::make_shared<SBEncoder>(request->stream);
     request->opened = request->encoder->open();
+    sonos_position_connection(request->stream, request->id);
     activeRequest = request;
     g_enc = request->encoder;
     if (promoted)
@@ -161,19 +163,23 @@ void invalidate_squeezebox_held_get(unsigned stream)
     }
 }
 
-void encode_squeezebox_audio(const char* data, int len)
+void encode_squeezebox_audio(const char* data, int len, uint64_t firstFrame)
 {
     unsigned stream = get_squeezebox_stream_id();
     unsigned serial = get_lms_stream_serial();
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (stream == get_squeezebox_stream_id() && serial == get_lms_stream_serial()) {
         std::shared_ptr<SBEncoder> enc;
+        uint64_t requestId = 0;
         {
             std::lock_guard<std::mutex> lock(g_enc_mutex);
             enc = g_enc;
+            if (activeRequest && enc == activeRequest->encoder) requestId = activeRequest->id;
         }
         if (enc && enc->streamId() == stream && !enc->cancelled() && !enc->responseEnded() && !enc->producerRetired()) {
-            int written = enc->write(data, len, SBSTREAMER_TIMEOUT);
+            int written = enc->write(data, len, SBSTREAMER_TIMEOUT, [=] {
+                sonos_position_pcm(stream, requestId, firstFrame);
+            });
             if (written == len) return;
             // Active-request termination or resume may replace the encoder
             // while write waits. Retry the SAME PCM block on the new encoder.

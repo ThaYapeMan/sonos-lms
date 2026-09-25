@@ -159,6 +159,7 @@ extern "C" unsigned get_squeezebox_stream_id(void) { return streamId.load(); }
 extern "C" void new_squeezebox_stream_id(void)
 {
     unsigned id = streamId.fetch_add(1) + 1;
+    reset_sonos_position(id);
     cancelFeedRestart("stream id changed");
     {
         std::lock_guard<std::mutex> lock(resumeMutex);
@@ -200,6 +201,7 @@ extern "C" void sonos_lms_transport(char command)
         printf("strm %c: decision=%s stream=%u\n", command, decision, streamId.load());
     }
     if (command == 's') {
+        reset_sonos_position(streamId.load());
         ++lmsStreamSerial; // release a producer waiting on an obsolete HTTP request
         lmsPaused.store(false);
         return;
@@ -614,7 +616,7 @@ static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition)
         std::string artUrl = track.artworkUrl.empty()
             ? gPlayer->GetControllerUri() + res->iconUri : track.artworkUrl;
         printf("PlaySqueezeBox: title='%s' art='%s'\n", title.c_str(), artUrl.c_str());
-        if (resetPosition) set_sonos_position_ms(0);
+        if (resetPosition) reset_sonos_position(stream_id);
         ok = gPlayer->PlayStream(streamURL, title, artUrl);
         if (ok) {
             ourStreamStarted.store(true);
@@ -736,14 +738,12 @@ void playLocalFileOnce(const std::string& filePath)
 // network round trip per second, not one per iteration.
 void pollSonosPosition()
 {
+    auto token = sonos_position_poll_token();
     SONOS::ElementList posVars;
     if (!gPlayer->GetPositionInfo(posVars))
         return;
     uint32_t ms = parse_reltime_ms(posVars.GetValue("RelTime"));
-    if (ms > 0)
-        set_sonos_position_ms(ms);
-    // ms == 0: Sonos stopped/buffering; leave the atomic at whatever
-    // PlaySqueezeBox last set it to (normally 0 on a fresh stream).
+    set_sonos_position_ms(token, ms);
 }
 
 // Runs the periodic (every ~30s, or immediately on a Sonos event) status

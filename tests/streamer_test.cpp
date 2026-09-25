@@ -1,4 +1,5 @@
 #include "sbstreamer.h"
+#include "sonos-position.h"
 #include "resume_state.h"
 #include "device_resume.h"
 #include "flac_metadata.h"
@@ -32,7 +33,7 @@ extern "C" uint32_t get_sb_time_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
-extern "C" void encode_squeezebox_audio(const char*, int);
+extern "C" void encode_squeezebox_audio(const char*, int, uint64_t firstFrame = 0);
 extern "C" void end_squeezebox_response(void);
 extern "C" int squeezebox_response_ended(unsigned stream);
 extern "C" int squeezebox_response_open(unsigned stream);
@@ -147,11 +148,11 @@ static void serve(SBStreamer& broker, Socket& socket) {
     RequestBroker::handle handle{nullptr, &request};
     assert(broker.HandleRequest(&handle));
 }
-static void feed(int first) {
+static void feed(int first, uint64_t firstFrame = 0) {
     // 8192 stereo frames produce real FLAC frames, not merely init metadata.
     std::vector<int16_t> pcm(8192 * 2);
     for (unsigned i = 0; i < pcm.size(); ++i) pcm[i] = (first + i * 7919) % 30000;
-    encode_squeezebox_audio(reinterpret_cast<const char*>(pcm.data()), pcm.size() * 2);
+    encode_squeezebox_audio(reinterpret_cast<const char*>(pcm.data()), pcm.size() * 2, firstFrame);
 }
 static void playable(const Socket& socket, int first) {
     assert(socket.headers.find("200 OK") != std::string::npos);
@@ -174,11 +175,11 @@ static void ready(std::future<void>& request) {
     assert(request.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
     request.get();
 }
-static void connection(SBStreamer& broker, Socket& socket, int first, bool held = false) {
+static void connection(SBStreamer& broker, Socket& socket, int first, bool held = false, uint64_t firstFrame = 0) {
     auto http = std::async(std::launch::async, [&] { serve(broker, socket); });
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
     assert(socket.headersSent.load() == !held); // only a paused resume waits for PCM
-    feed(first);
+    feed(first, firstFrame);
     assert(http.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
     http.get();
 }
@@ -449,7 +450,21 @@ static void stopPauseStreamTest() {
     puts("PASS: stop-for-pause fresh resume GET has normal FLAC header and chunked audio despite frames/raw settings");
 }
 
-int main(int argc, char**) {
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "position") {
+        SBStreamer broker;
+        Socket initial(1), resumed(1), track(2);
+        connection(broker, initial, 2000);
+        assert(get_sonos_position_frames(44100) == 0);
+        connection(broker, resumed, 2100, false, 18 * 44100);
+        assert(get_sonos_position_frames(44100) == 18 * 44100);
+        playable(resumed, 2100);
+        generation = 2;
+        connection(broker, track, 2200);
+        assert(get_sonos_position_frames(44100) == 0);
+        puts("PASS: real streamer/encoder anchors the first PCM of a same-stream GET and resets for a new stream");
+        return 0;
+    }
     if (pauseMode() == PauseMode::Stop) { stopPauseStreamTest(); return 0; }
     if (deviceResumeStrategy() == DeviceResume::FeedRestart) { feedRestartStreamTest(); return 0; }
     if (deviceResumeStrategy() == DeviceResume::PlayOnlyFrames) { framesResumeTest(); return 0; }
