@@ -210,6 +210,17 @@ check_song() {
 lms_mode() { local r; r=$(cli_raw "$PLAYER mode ?"); printf '%s' "${r##* }"; }
 lms_time() { field "$(cli_raw "$PLAYER status - 1 tags:a")" time 2>/dev/null || echo 0; }
 
+# position_check <label> <LMS time while paused>: after a resume the LMS
+# position must continue from the paused position, not restart near 0.
+# The LMS time is what the bridge reports from Sonos's own play position.
+position_check() {
+    local now verdict
+    now=$(lms_time)
+    verdict=$(awk -v p="${2:-0}" -v n="${now:-0}" 'BEGIN {
+        if (n + 1 < p) print "RESTARTED"; else print "CONTINUED" }')
+    mark "$1 POSITION $verdict: paused at ${2%.*}s, now ${now%.*}s"
+}
+
 # Wait up to $2 seconds until the speaker reports state $1.
 # Speaker states that count as "paused": the bridge may answer a pause with a
 # UPnP Stop (SONOS_SQUEEZEBOX_PAUSE=stop), so a paused speaker can be STOPPED.
@@ -332,15 +343,18 @@ setup_playing_a() {
 scenario_1() {
     mark "S1 BASELINE: LMS starts track A, LMS pause/resume (expected clean)"
     play_track "$TRACK_A_ID"; wait_s 20; snapshot
+    local tp
     mark "S1 LMS pause";  lms pause 1; wait_s 5; snapshot
+    tp=$(lms_time)
     mark "S1 LMS resume"; lms pause 0; wait_s 10; snapshot
+    position_check "S1" "$tp"
     observe "S1: did it resume where it paused? (c=continued, r=restarted, s=silent, other)"
 }
 
 scenario_2() {
     mark "S2 SONOS APP pause/resume x3 on track A"
     setup_playing_a || return 0
-    local i st
+    local i st tp
     for i in 1 2 3; do
         # Precondition: the speaker really plays the current song. A failed
         # previous resume must not turn into "pause the silence".
@@ -356,6 +370,7 @@ scenario_2() {
             mark "S2.$i PAUSE NOT CONFIRMED: speaker=$(sonos_state), lms_mode=$(lms_mode)"
         fi
         wait_s 3; snapshot
+        tp=$(lms_time)
         prompt "S2.$i press PLAY in the Sonos app"
         if wait_sonos PLAYING 10 && speaker_on_current_song; then
             mark "S2.$i RESUME OK: $(now_playing)"
@@ -364,7 +379,8 @@ scenario_2() {
             mark "S2.$i RESUME FAIL: speaker=${st:-unknown}, lms_mode=$(lms_mode); $(now_playing)"
         fi
         wait_s 5; snapshot
-        observe "S2.$i: continued (c), restarted (r), silent (s), error dialog (e)?"
+        position_check "S2.$i" "$tp"
+        observe "S2.$i: error dialog in the app (e), or none (n)?"
     done
 }
 
@@ -430,7 +446,8 @@ scenario_6() {
         return 0
     fi
     mark "S6 pause confirmed: speaker $(sonos_state), LMS pause; countdown starts"
-    local left=$LONG_PAUSE st
+    local left=$LONG_PAUSE st tp
+    tp=$(lms_time)
     while (( left > 0 )); do
         printf '\r    paused, %4ds left ' "$left" >&2
         wait_s 10; (( left -= 10 ))
@@ -447,7 +464,8 @@ scenario_6() {
     snapshot
     prompt "S6 press PLAY in the Sonos app"; wait_s 15; snapshot
     mark "S6 after PLAY: speaker=$(sonos_state) lms_mode=$(lms_mode)"
-    observe "S6: continued (c), restarted (r), silent (s), error dialog (e)?"
+    position_check "S6" "$tp"
+    observe "S6: error dialog in the app (e), silent (s), or fine (n)?"
 }
 
 # ------------------------------------------------------------------ main ---
