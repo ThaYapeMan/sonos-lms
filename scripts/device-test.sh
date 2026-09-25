@@ -13,18 +13,18 @@
 #   capture.pcap     UPnP (1400) + stream + slimproto (3483) traffic
 #
 # Usage (as root on the bridge host):
-#   scripts/device-test.sh                  # all scenarios
+#   scripts/device-test.sh                  # scenarios 1–7
 #   SCENARIOS="1 2" scripts/device-test.sh  # a subset
 #   LONG_PAUSE=1200 scripts/device-test.sh  # 20-minute pause in scenario 6
 #   LMS_SSH=root@192.168.178.23 scripts/device-test.sh   # also tail server.log
 #
 # Settings (environment):
 #   ROOM        Sonos room / systemd instance            (default: Study)
-#   LMS         LMS host             (default: LMS_SERVER from config, else discovery log)
+#   LMS         LMS host             (default: config, recent journal, unit --server, full journal)
 #   PLAYER      LMS player id (MAC)  (default: looked up as "<ROOM> (Sonos)")
 #   TRACK_A     search text, or id:<n> for track A       (default: Just A Little Bit More)
 #   TRACK_B     search text, or id:<n> for track B       (default: False Need)
-#   SCENARIOS   which scenarios to run                   (default: 1 2 3 4 5 6)
+#   SCENARIOS   which scenarios to run                   (default: 1 2 3 4 5 6 7)
 #   LONG_PAUSE  seconds paused in scenario 6             (default: 120)
 #   LMS_SSH     ssh target for the LMS host; empty skips server.log
 #   LMS_LOG     server.log path on the LMS host (default: /var/log/squeezeboxserver/server.log)
@@ -36,7 +36,7 @@ set -uo pipefail
 ROOM=${ROOM:-Study}
 TRACK_A=${TRACK_A:-Just A Little Bit More}
 TRACK_B=${TRACK_B:-False Need}
-SCENARIOS=${SCENARIOS:-1 2 3 4 5 6}
+SCENARIOS=${SCENARIOS:-1 2 3 4 5 6 7}
 LONG_PAUSE=${LONG_PAUSE:-120}
 LMS_SSH=${LMS_SSH:-}
 LMS_LOG=${LMS_LOG:-/var/log/squeezeboxserver/server.log}
@@ -468,7 +468,7 @@ scenario_6() {
     observe "S6: error dialog in the app (e), silent (s), or fine (n)?"
 }
 
-# Opt in with SCENARIOS=7 until physically verified.
+# LMS-stop/app-Play regression; also selectable alone with SCENARIOS=7.
 scenario_7() {
     mark "S7 LMS stop, then Sonos-app play"
     setup_playing_a || return 0
@@ -483,20 +483,55 @@ scenario_7() {
     observe "S7: plays (p), silent (s), error dialog (e)?"
 }
 
+# --------------------------------------------------------- LMS discovery ---
+
+lms_from_exec_start() {
+    local command host pattern='(^|[[:space:]])--server(=|[[:space:]]+)([^[:space:];]+)'
+    command=$(cat)
+    # Parse systemctl's argv[] text as data; never eval a unit command line.
+    [[ $command =~ $pattern ]] || return 1
+    host=${BASH_REMATCH[3]}
+    host=${host#\"}; host=${host%\"}
+    host=${host#\'}; host=${host%\'}
+    [[ -n $host && $host != --* ]] || return 1
+    printf '%s\n' "$host"
+}
+
+lms_from_journal() {
+    sed -n 's/.*LMS server from [^:]*: \([^ ]*\).*/\1/p' | tail -n1
+}
+
+resolve_lms_host() {
+    local config=${1:-/etc/sonos-squeezebox/config}
+    LMS_SOURCE='LMS override'
+    if [[ -z ${LMS:-} ]]; then
+        LMS=$(sed -n 's/^[[:space:]]*LMS_SERVER=[[:space:]]*//p' "$config" 2>/dev/null | head -n1)
+        LMS_SOURCE='config LMS_SERVER'
+    fi
+    if [[ -z ${LMS:-} ]] && have journalctl; then
+        LMS=$(journalctl -u "$UNIT" -n 500 --no-pager -o cat 2>/dev/null | lms_from_journal)
+        LMS_SOURCE='recent unit journal'
+    fi
+    if [[ -z ${LMS:-} ]] && have systemctl; then
+        LMS=$(systemctl show "$UNIT" -p ExecStart 2>/dev/null | lms_from_exec_start)
+        LMS_SOURCE='unit ExecStart --server'
+    fi
+    if [[ -z ${LMS:-} ]] && have journalctl; then
+        LMS=$(journalctl -u "$UNIT" --no-pager -o cat 2>/dev/null | lms_from_journal)
+        LMS_SOURCE='full unit journal'
+    fi
+    [[ -n ${LMS:-} ]] || return 1
+    mark "LMS host $LMS (source: $LMS_SOURCE)"
+    return 0
+}
+
 # ------------------------------------------------------------------ main ---
 
 [[ $EUID -eq 0 ]] || fail "run as root (tcpdump and journal access)"
 have systemd-escape && UNIT=$(systemd-escape --template=sonos-squeezebox@.service -- "$ROOM") \
     || UNIT="sonos-squeezebox@$ROOM.service"
 
-if [[ -z ${LMS:-} ]]; then
-    LMS=$(sed -n 's/^[[:space:]]*LMS_SERVER=[[:space:]]*//p' /etc/sonos-squeezebox/config 2>/dev/null | head -n1)
-fi
-if [[ -z ${LMS:-} ]] && have journalctl; then
-    LMS=$(journalctl -u "$UNIT" -n 500 --no-pager 2>/dev/null \
-        | sed -n 's/.*LMS server from [^:]*: \([^ ]*\).*/\1/p' | tail -n1)
-fi
-[[ -n ${LMS:-} ]] || fail "LMS host unknown; run with LMS=<ip>"
+resolve_lms_host || fail "LMS host unknown; run with LMS=<ip>"
 cli_raw "version ?" >/dev/null || fail "no LMS CLI at $LMS:$CLI_PORT"
 
 if have systemctl && ! systemctl is-active --quiet "$UNIT"; then

@@ -62,6 +62,7 @@ test: position-test encoder-test resume-state-test streamer-test
 	env -u SONOS_SQUEEZEBOX_PAUSE ./streamer-test stop
 	python3 tests/device_resume_test.py
 	python3 tests/lms_discovery_test.py
+	python3 tests/device_test_script_test.py
 	python3 tests/pause_mode_test.py
 
 sbstreamer.o sbencoder.o: sbencoder.h

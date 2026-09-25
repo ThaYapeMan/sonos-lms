@@ -135,12 +135,14 @@ audio. Wrong-stream invalidation is ignored and active audio is preserved.
 Repeat physical checks after changes; local tests cannot establish audible
 continuity, app dialogs, or device timing.
 
-Opt-in **S7: LMS stop, then Sonos-app Play** (`SCENARIOS=7 scripts/device-test.sh`):
+**S7: LMS stop, then Sonos-app Play** (`SCENARIOS=7 scripts/device-test.sh`):
 expect STOPPED and LMS mode stop after five seconds, with no automatic restart.
 Press Play in the app: expect one LMS `play`, fresh FLAC audio on the held GET
 (or a redirect to the new stream if LMS restarts the track), no 503, and no app
 dialog. Record speaker state, LMS mode and now-playing after 15 seconds. S7 is
-not yet physically verified and is excluded from the default scenarios 1–6.
+included in the default scenarios 1–7; the fix still needs physical verification.
+LMS host selection is logged: explicit `LMS`, config, recent unit journal,
+unit `ExecStart --server`, then the full unit journal.
 
 S7 evidence from `sonos-test-20260925-160545` (9e47596) showed q-Stop worked,
 but LMS's restart q ended held GET #58 with 503 before s allocated stream 11;

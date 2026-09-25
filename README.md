@@ -224,8 +224,11 @@ ordinary q still ends the response. A held resume sends no bytes if the client
 closes it, or returns the existing 503 after its five-second deadline. Each
 outcome is logged as `held resume GET #N` followed by `-> 302 stream M`, `fed`,
 `closed by client`, or `expired`. Explicit `pause=pause` retains deferred Pause.
-Physical scenario 7 is opt-in (`SCENARIOS=7 scripts/device-test.sh`) until verified;
-the default remains scenarios 1–6.
+The physical script defaults to scenarios 1–7; run S7 alone with
+`SCENARIOS=7 scripts/device-test.sh`. The S7 fix still needs a physical recheck.
+`LMS=<ip>` overrides host detection. Otherwise the script checks config, recent
+unit journal, the unit's `ExecStart --server` (both argument forms), then the
+full unit journal, and records the source in its step log.
 LMS pause/play intent is retained while a transport call or stream restart is
 busy; the latest state is applied once ready, with a deferred-transport log.
 PlayStream failures retry up to three attempts, one second apart, then wait for
