@@ -17,7 +17,16 @@ bridge host stays readable.
 Standard library only.
 
   reference-relay.py --upstream URL [--port 8990] [--content-type TYPE]
+  reference-relay.py --file song.flac [--port 8990]   # serve a local FLAC file as live radio
   reference-relay.py --probe --upstream URL     # print content type + format, exit
+  reference-relay.py --probe --file song.flac
+
+--file turns the relay into a minimal FLAC radio server: every GET gets the
+complete file from the start (fLaC header, metadata, frames), with a 2-second
+burst and then paced at the file's own average byte rate, looping. Plain HTTP
+body, Connection: close, no chunked encoding -- exactly how the reference MP3
+station was served. It answers one question: does Sonos also report a FLAC
+radio stream as corrupt on the first Play after a pause, or only ours?
 """
 
 import argparse
@@ -53,12 +62,13 @@ def describe(data):
         return "Ogg page (OggS)"
     if data.startswith(b"ID3"):
         return "ID3 tag (MP3)"
+    # FLAC frame sync (FF F8/F9) is also a valid MPEG-2 AAC ADTS sync, so test it first
+    if len(data) >= 2 and data[0] == 0xFF and data[1] in (0xF8, 0xF9):
+        return "FLAC audio frame (no header) or MPEG-2 AAC ADTS"
     if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xF6) == 0xF0:
         return "AAC ADTS frame"
     if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
         return "MPEG audio frame (MP3)"
-    if len(data) >= 2 and data[0] == 0xFF and data[1] in (0xF8, 0xF9):
-        return "FLAC audio frame (no header)"
     return "unknown"
 
 
@@ -71,10 +81,30 @@ def open_upstream(url, sonos_headers):
     return urllib.request.urlopen(req, timeout=10)
 
 
+def flac_rate(path):
+    """Average bytes per second of a native FLAC file (from STREAMINFO)."""
+    with open(path, "rb") as f:
+        head = f.read(42)
+    if not head.startswith(b"fLaC") or head[4] & 0x7F != 0:
+        raise ValueError(f"{path} is not a native FLAC file (no fLaC + STREAMINFO)")
+    info = head[8:42]
+    sample_rate = (info[10] << 12) | (info[11] << 4) | (info[12] >> 4)
+    total = ((info[13] & 0x0F) << 32) | int.from_bytes(info[14:18], "big")
+    if not sample_rate or not total:
+        raise ValueError(f"{path}: STREAMINFO has no sample rate or length")
+    seconds = total / sample_rate
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+    return size / seconds, seconds, sample_rate
+
+
 class Relay(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     upstream = None
     forced_type = None
+    file = None
+    file_rate = 0.0
 
     def log_message(self, fmt, *args):  # silence the default access log
         pass
@@ -95,15 +125,46 @@ class Relay(BaseHTTPRequestHandler):
     def do_HEAD(self):
         rid = next(_ids)
         self._log_request(rid)
-        ctype = self.forced_type or LAST_CONTENT_TYPE or "application/octet-stream"
+        ctype = self.forced_type or LAST_CONTENT_TYPE or ("audio/flac" if self.file else "application/octet-stream")
         self._send_head(rid, ctype, [])
         log(f"#{rid} HEAD answered")
+
+    def serve_file(self, rid, started):
+        ctype = self.forced_type or "audio/flac"
+        self._send_head(rid, ctype, [])
+        sent = 0
+        first = True
+        reason = "file served"
+        burst = self.file_rate * 2.0
+        try:
+            while True:  # loop the file like a station that never ends
+                with open(self.file, "rb") as f:
+                    while True:
+                        chunk = f.read(8192)
+                        if not chunk:
+                            break
+                        if first:
+                            log(f"#{rid} first body bytes: {chunk[:32].hex(' ')} -> {describe(chunk)}")
+                            first = False
+                        self.wfile.write(chunk)
+                        sent += len(chunk)
+                        due = started + max(0.0, (sent - burst) / self.file_rate)
+                        wait = due - time.monotonic()
+                        if wait > 0:
+                            time.sleep(wait)
+        except (BrokenPipeError, ConnectionResetError, socket.timeout) as exc:
+            reason = f"client closed ({type(exc).__name__})"
+        except Exception as exc:
+            reason = f"error {exc!r}"
+        log(f"#{rid} ended: {reason}; {sent} bytes in {time.monotonic() - started:.1f}s")
 
     def do_GET(self):
         global LAST_CONTENT_TYPE
         rid = next(_ids)
         self._log_request(rid)
         started = time.monotonic()
+        if self.file:
+            return self.serve_file(rid, started)
         try:
             up = open_upstream(self.upstream, self.headers)
         except Exception as exc:  # report upstream failure as Sonos would see it
@@ -145,6 +206,19 @@ class Relay(BaseHTTPRequestHandler):
         log(f"#{rid} ended: {reason}; {sent} bytes in {time.monotonic() - started:.1f}s")
 
 
+def probe_file(path):
+    try:
+        rate, seconds, sample_rate = flac_rate(path)
+        with open(path, "rb") as f:
+            data = f.read(4096)
+    except Exception as exc:
+        print(f"ERROR {exc}")
+        return 1
+    print("CONTENT_TYPE=audio/flac")
+    print(f"FORMAT={describe(data)}, {sample_rate} Hz, {seconds:.0f} s, {rate * 8 / 1000:.0f} kbit/s")
+    return 0
+
+
 def probe(url):
     try:
         up = open_upstream(url, {})
@@ -160,18 +234,23 @@ def probe(url):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--upstream", required=True, help="live station URL (http or https)")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--upstream", help="live station URL (http or https)")
+    src.add_argument("--file", help="local native FLAC file, served as a looping live stream")
     ap.add_argument("--port", type=int, default=8990)
     ap.add_argument("--content-type", help="force the Content-Type sent to Sonos")
     ap.add_argument("--probe", action="store_true", help="print the upstream content type and format, then exit")
     args = ap.parse_args()
     if args.probe:
-        return probe(args.upstream)
+        return probe_file(args.file) if args.file else probe(args.upstream)
     Relay.upstream = args.upstream
     Relay.forced_type = args.content_type
+    if args.file:
+        Relay.file = args.file
+        Relay.file_rate, seconds, _ = flac_rate(args.file)
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Relay)
     server.daemon_threads = True
-    log(f"relay listening on :{args.port} -> {args.upstream}")
+    log(f"relay listening on :{args.port} -> {args.file or args.upstream}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

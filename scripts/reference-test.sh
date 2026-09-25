@@ -11,9 +11,11 @@
 # Usage (as root on the bridge host):
 #   scripts/reference-test.sh
 #   UPSTREAM=http://some.station/stream.mp3 scripts/reference-test.sh
+#   FILE=/root/ref.flac scripts/reference-test.sh   # a local FLAC file as FLAC radio
 #
 # Settings (environment):
 #   UPSTREAM     live station URL, http or https (default: Radio Paradise MP3 192k)
+#   FILE         native FLAC file served as looping live radio instead of UPSTREAM
 #   SONOS_IP     speaker to use                     (default: 192.168.178.132, Study)
 #   ROOM         bridge room to stop meanwhile      (default: Study)
 #   HOST_IP      this host's address as Sonos sees it (default: first of hostname -I)
@@ -32,6 +34,9 @@
 set -uo pipefail
 
 UPSTREAM=${UPSTREAM:-http://stream.radioparadise.com/mp3-192}
+FILE=${FILE:-}
+if [[ -n $FILE ]]; then SOURCE=(--file "$FILE"); SOURCE_NAME=$FILE
+else SOURCE=(--upstream "$UPSTREAM"); SOURCE_NAME=$UPSTREAM; fi
 SONOS_IP=${SONOS_IP:-192.168.178.132}
 ROOM=${ROOM:-Study}
 PORT=${PORT:-8990}
@@ -118,7 +123,7 @@ finish() {
     if (( BRIDGE_WAS_ACTIVE )); then
         systemctl start "$UNIT" && mark "bridge $UNIT started again"
     fi
-    { echo "upstream=$UPSTREAM mime=$MIME format=$FORMAT"
+    { echo "source=$SOURCE_NAME mime=$MIME format=$FORMAT"
       echo "sonos=$SONOS_IP host=$HOST_IP port=$PORT rounds=$ROUNDS pause=$PAUSE_SECS"
     } > "$OUT/run-info.txt"
     tar -czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
@@ -133,8 +138,8 @@ have python3 || fail "python3 is required (apt install python3)"
 [[ -n $HOST_IP ]] || fail "cannot determine this host's IP; set HOST_IP="
 UNIT=$(systemd-escape --template=sonos-squeezebox@.service -- "$ROOM" 2>/dev/null || echo "sonos-squeezebox@$ROOM.service")
 
-say "Probing $UPSTREAM ..."
-probe=$(python3 "$HERE/reference-relay.py" --probe --upstream "$UPSTREAM") || fail "station not reachable: $probe"
+say "Probing $SOURCE_NAME ..."
+probe=$(python3 "$HERE/reference-relay.py" --probe "${SOURCE[@]}") || fail "source not usable: $probe"
 MIME=${MIME:-$(sed -n 's/^CONTENT_TYPE=//p' <<<"$probe" | cut -d';' -f1)}
 FORMAT=$(sed -n 's/^FORMAT=//p' <<<"$probe")
 say "  content type $MIME, format: $FORMAT"
@@ -147,13 +152,13 @@ read -r -p "Press Enter to start " _ || true
 
 trap finish EXIT
 trap 'exit 130' INT TERM
-mark "RUN START upstream=$UPSTREAM mime=$MIME format=$FORMAT"
+mark "RUN START source=$SOURCE_NAME mime=$MIME format=$FORMAT"
 if systemctl is-active --quiet "$UNIT"; then
     BRIDGE_WAS_ACTIVE=1
     systemctl stop "$UNIT" && mark "bridge $UNIT stopped"
 fi
 
-python3 -u "$HERE/reference-relay.py" --upstream "$UPSTREAM" --port "$PORT" > "$OUT/relay.log" 2>&1 &
+python3 -u "$HERE/reference-relay.py" "${SOURCE[@]}" --port "$PORT" > "$OUT/relay.log" 2>&1 &
 PIDS+=($!)
 ( prev=''; while :; do st=$(sonos_state); [[ $st != "$prev" ]] && printf '%s %s\n' "$(now)" "$st"; prev=$st; sleep 0.5; done ) \
     > "$OUT/sonos-state.log" 2>&1 &
