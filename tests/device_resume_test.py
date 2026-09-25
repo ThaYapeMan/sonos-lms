@@ -24,6 +24,7 @@ bodies = "\n\n".join(production_function(signature) for signature in (
     "static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition)\n",
     'extern "C" void new_squeezebox_stream_id(',
     "static void dispatchDeferredStop(",
+    "static void dispatchStreamStart(",
     "static void dispatchTransportIntent(",
     'extern "C" void sonos_lms_transport(',
     "static void ObserveDeviceTransport(",

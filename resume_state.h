@@ -2,10 +2,12 @@
 #define RESUME_STATE_H
 
 #include <string>
+#include <chrono>
 
 // Caller serializes access. HTTP requests never change LMS transport intent.
 class ResumeState {
 public:
+    using Clock = std::chrono::steady_clock;
     enum class Unpause { None, NewStream, FeedHeldGet, SameURL };
 
     Unpause command(char command, bool responseOpen = false) {
@@ -65,10 +67,11 @@ public:
         return false;
     }
 
-    bool takeResume(unsigned requestedId, unsigned currentId) {
+    bool takeResume(unsigned requestedId, unsigned currentId, Clock::time_point now = Clock::now()) {
         if (requestedId != currentId || !paused || !sawPause || !transitioning || requested)
             return false;
         requested = true;
+        resumeDeadline = now + std::chrono::seconds(5);
         return true;
     }
 
@@ -81,7 +84,11 @@ public:
     bool stoppedForPause(unsigned stream) const { return stream && stoppedPauseId == stream; }
 
 
-    void retryResume() { requested = false; }
+    bool expireResume(Clock::time_point now = Clock::now()) {
+        if (!requested || now < resumeDeadline) return false;
+        requested = transitioning = false;
+        return true;
+    }
 
 private:
     void clearStoppedPause() {
@@ -100,5 +107,6 @@ private:
     bool sawPause = false;
     bool transitioning = false;
     bool requested = false;
+    Clock::time_point resumeDeadline{};
 };
 #endif

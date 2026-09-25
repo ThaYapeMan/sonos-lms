@@ -15,11 +15,15 @@ static std::atomic<bool> ourStreamStarted{true}, lmsPaused{false};
 static std::atomic<unsigned> streamId{6}, lmsStreamSerial{0}, completedStream{6};
 static std::mutex resumeMutex, stopMutex, transportMutex, intentMutex;
 static TransportIntent transportIntent;
+static RetryBudget streamStartRetry;
+static unsigned retryStream = 0;
+static uint64_t retryRevision = 0;
 static ResumeState resumeState;
 static StopDebounce deferredStop;
 static bool stream_just_restarted() { return streamId.load() != completedStream.load(); }
 static bool responseOpen = false, responseEnded = false;
-static bool pauseResult = true;
+static bool pauseResult = true, cliResult = true, testingStreamStart = false;
+static unsigned playStreamFailures = 0;
 static unsigned pauseCalls = 0, responseEnds = 0;
 static unsigned cliPlays = 0, cliPauses = 0, stopCalls = 0;
 static std::atomic<unsigned> streamPlays{0};
@@ -34,9 +38,13 @@ struct FakePlayer {
     bool PlayStream(const std::string& url, const std::string&, const std::string&) {
         assert(url == "http://bridge/music/squeezebox.flac?stream=6");
         callOrder.push_back("PlayStream");
-        assert(heldGetInvalidations == streamPlays + 1);
-        assert(callOrder.size() == 2 && callOrder[0] == "invalidate" && callOrder[1] == "PlayStream");
+        if (!testingStreamStart) {
+            assert(heldGetInvalidations == streamPlays + 1);
+            assert(callOrder.size() >= 2 && callOrder[callOrder.size() - 2] == "invalidate"
+                && callOrder.back() == "PlayStream");
+        }
         ++streamPlays;
+        if (playStreamFailures) { --playStreamFailures; return false; }
         return true;
     }
     bool Stop() {
@@ -75,7 +83,7 @@ static void invalidate_squeezebox_held_get(unsigned id) {
 static bool sendLmsCommand(int, int, const char* command) {
     if (std::string(command) == "play") ++cliPlays;
     if (std::string(command) == "pause 1") ++cliPauses;
-    return true;
+    return cliResult;
 }
 // The real PlaySqueezeBoxLocked runs too; only its network/data sources are fake.
 #define SBSTREAMER_CNAME "squeezebox"
@@ -144,9 +152,11 @@ static void paused(const char* status) {
 
 #include "stop_pause_cases.h"
 #include "transport_intent_cases.h"
+#include "retry_cases.h"
 
 int main() {
     transportIntentCases();
+    retryCases();
     if (pauseMode() == PauseMode::Stop) { stopPauseCases(); return 0; }
     // Isolate logging from device I/O, and check heartbeats between every
     // supported transport command rather than only at startup.

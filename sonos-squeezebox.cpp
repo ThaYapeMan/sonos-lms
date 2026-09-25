@@ -78,6 +78,9 @@ extern "C" int sonos_lms_is_paused(void) { return lmsPaused.load(); }
 static std::mutex transportMutex;
 static std::mutex intentMutex;
 static TransportIntent transportIntent;
+static RetryBudget streamStartRetry; // protected by transportMutex
+static unsigned retryStream = 0;
+static uint64_t retryRevision = 0;
 extern "C" void end_squeezebox_response(void);
 extern "C" int squeezebox_response_ended(unsigned stream);
 extern "C" int squeezebox_response_open(unsigned stream);
@@ -107,7 +110,7 @@ static void dispatchTransportIntent()
     TransportIntent intent;
     {
         std::lock_guard<std::mutex> lock(intentMutex);
-        if (!transportIntent.pending) return;
+        if (!transportIntent.pending || !transportIntent.retry.ready(RetryBudget::Clock::now())) return;
         intent = transportIntent;
         transportIntent.pending = false; // a newer revision can arrive during I/O
     }
@@ -115,7 +118,7 @@ static void dispatchTransportIntent()
     const bool pause = command == 'p';
     auto unpause = intent.unpause;
     // A new stream's successful PlayStream already satisfies a deferred play.
-    if (!pause && intent.stream != streamId.load()) {
+    if (!pause && (intent.stream != streamId.load() || intent.restartPending)) {
         if (intent.deferred) printf("strm u: deferred intent applied by new stream\n");
         return;
     }
@@ -142,9 +145,11 @@ static void dispatchTransportIntent()
         else
             printf("strm %c -> UPnP %s\n", command, pause ? "Pause" : "Play");
         bool ok;
-        if (ended || missing || error) {
+        const bool playStreamAttempt = ended || missing || error;
+        if (playStreamAttempt) {
             if (error) printf("device in error state -> re-issuing PlayStream\n");
             if (missing) invalidate_squeezebox_held_get(streamId.load());
+            intent.retry.begin();
             ok = PlaySqueezeBoxLocked(streamId.load(), false);
         } else {
             // Sonos withholds its Pause acknowledgement until the stream closes.
@@ -162,7 +167,21 @@ static void dispatchTransportIntent()
             printf("gPlayer->%s took %lldms\n", pause ? (stopForPause ? "Stop" : "Pause") : "Play", (long long)upnpMs);
         }
         if (ok && intent.deferred) printf("strm %c: deferred transport applied\n", command);
-        if (!ok) printf("strm %c: device transport command failed\n", command);
+        if (!ok) {
+            printf("strm %c: device transport command failed\n", command);
+            if (playStreamAttempt) {
+                std::lock_guard<std::mutex> lock(intentMutex);
+                if (transportIntent.revision == intent.revision) {
+                    intent.retry.failed(RetryBudget::Clock::now());
+                    transportIntent.retry = intent.retry;
+                    transportIntent.unpause = ResumeState::Unpause::SameURL;
+                    transportIntent.pending = !intent.retry.exhausted();
+                    transportIntent.deferred = true;
+                    printf("PlayStream(same URL): attempt %u/3 failed; %s\n",
+                        intent.retry.count(), transportIntent.pending ? "retry in 1 s" : "giving up until next stream/command");
+                }
+            }
+        }
     }
 }
 
@@ -192,6 +211,8 @@ extern "C" void sonos_lms_transport(char command)
         transportIntent.stream = streamId.load();
         transportIntent.unpause = unpause;
         transportIntent.deferred = false;
+        transportIntent.retry = RetryBudget{};
+        transportIntent.restartPending = stream_just_restarted();
         lmsPaused.store(command == 'p' || command == 'q');
         transportIntent.pending = (command == 'p' || command == 'u')
             && unpause != ResumeState::Unpause::NewStream && streamId.load() != 0;
@@ -480,6 +501,8 @@ static void ObserveDeviceTransport(const std::string& state)
     bool relay;
     {
         std::lock_guard<std::mutex> lock(resumeMutex);
+        if (resumeState.expireResume())
+            printf("Device-initiated resume lease expired: 5 s without strm u\n");
         relay = resumeState.observe(state);
     }
     if (relay) {
@@ -508,8 +531,7 @@ void ResumeSqueezeBox(unsigned requested)
     if (resume) {
         printf("Device-initiated resume: current stream %u\n", requested);
         if (!sendLmsCommand(gServer, gMac, "play")) {
-            std::lock_guard<std::mutex> lock(resumeMutex);
-            resumeState.retryResume();
+            printf("Device-initiated resume: LMS play failed; retaining 5 s lease\n");
         }
     }
 }
@@ -534,15 +556,38 @@ static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition)
             acknowledge_squeezebox_resume(stream_id);
         }
     }
-    if (stream_id == streamId.load()) completedStream.store(stream_id);
+    if (ok && stream_id == streamId.load()) completedStream.store(stream_id);
     if (!ok) printf("PlaySqueezeBox: stream %u failed\n", stream_id);
     return ok;
 }
 
-bool PlaySqueezeBox(unsigned stream_id)
+static void dispatchStreamStart()
 {
-    std::lock_guard<std::mutex> lock(transportMutex);
-    return PlaySqueezeBoxLocked(stream_id, true);
+    std::unique_lock<std::mutex> transport(transportMutex, std::try_to_lock);
+    if (!transport.owns_lock()) return;
+    const unsigned current = streamId.load();
+    if (!current || completedStream.load() == current) return;
+    uint64_t revision;
+    {
+        std::lock_guard<std::mutex> lock(intentMutex);
+        revision = transportIntent.revision;
+    }
+    const bool newStream = current != retryStream;
+    if (newStream || revision != retryRevision) {
+        streamStartRetry = RetryBudget{};
+        retryStream = current;
+        retryRevision = revision;
+    }
+    if (!streamStartRetry.ready(RetryBudget::Clock::now())) return;
+    streamStartRetry.begin();
+    if (PlaySqueezeBoxLocked(current, newStream)) {
+        streamStartRetry.succeeded();
+    } else {
+        streamStartRetry.failed(RetryBudget::Clock::now());
+        printf("PlayStream(stream %u): attempt %u/3 failed; %s\n", current,
+            streamStartRetry.count(), streamStartRetry.exhausted()
+                ? "giving up until next stream/command" : "retry in 1 s");
+    }
 }
 
 // Parse UPnP RelTime "H:MM:SS" -> milliseconds; returns 0 on parse failure.
@@ -679,18 +724,13 @@ void refreshStatus(SONOS::Status& status)
 
 void runBridgeLoop(SONOS::Status& status)
 {
-    unsigned lastAppliedStreamId = 0;
     unsigned idleTicks = 0;
     constexpr unsigned kStatusRefreshTicks = 3000;  // ~30s at the 10ms sleep below
 
     status.update();
 
     for (;;) {
-        unsigned currentStreamId = get_squeezebox_stream_id();
-        if (currentStreamId != lastAppliedStreamId) {
-            lastAppliedStreamId = currentStreamId;
-            PlaySqueezeBox(currentStreamId);
-        }
+        dispatchStreamStart();
 
         pollSonosPosition();
 

@@ -211,6 +211,10 @@ URL. Each connection's RelTime is anchored to its first PCM's track offset so
 LMS position continues across reconnects. The deferred `strm q` path is unchanged.
 LMS pause/play intent is retained while a transport call or stream restart is
 busy; the latest state is applied once ready, with a deferred-transport log.
+PlayStream failures retry up to three attempts, one second apart, then wait for
+a new stream or transport command. A stream is complete only after success.
+A device-resume request expires after five seconds without LMS `strm u`, allowing
+another attempt; CLI errors retain that lease instead of retrying every poll.
 No environment overrides are needed. `SONOS_SQUEEZEBOX_PAUSE=pause` remains an
 explicit fallback to UPnP Pause and the previous same-URL resume behavior
 (including HTTP 503 for a speculative held GET). The pause switch is read and

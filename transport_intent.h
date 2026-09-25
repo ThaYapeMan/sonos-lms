@@ -1,6 +1,7 @@
 #ifndef TRANSPORT_INTENT_H
 #define TRANSPORT_INTENT_H
 #include "resume_state.h"
+#include "retry_budget.h"
 #include <cstdint>
 
 // Serialized by intentMutex. One desired state, never a queue of old commands.
@@ -9,7 +10,9 @@ struct TransportIntent {
     unsigned stream = 0;
     char command = 0;
     ResumeState::Unpause unpause = ResumeState::Unpause::None;
+    RetryBudget retry;
     bool pending = false;
     bool deferred = false;
+    bool restartPending = false;
 };
 #endif

@@ -78,4 +78,4 @@ sonos-position.o: position_state.h sonos-position.h
 output_sonos.o sonos-squeezebox.o sbstreamer.o streamer-test: sonos-position.h
 streamer-test: sonos-position.cpp position_state.h
 
-sonos-squeezebox.o: transport_intent.h
+sonos-squeezebox.o: transport_intent.h retry_budget.h

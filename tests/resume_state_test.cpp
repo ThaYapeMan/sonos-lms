@@ -3,6 +3,21 @@
 #include <cassert>
 #include <iostream>
 int main() {
+    ResumeState lease;
+    const auto leaseNow = ResumeState::Clock::now();
+    lease.command('p'); lease.stopForPause(9); lease.observe("STOPPED");
+    lease.observe("TRANSITIONING");
+    assert(lease.takeResume(9, 9, leaseNow));
+    assert(!lease.expireResume(leaseNow + std::chrono::milliseconds(4999)));
+    assert(!lease.takeResume(9, 9, leaseNow));
+    assert(lease.expireResume(leaseNow + std::chrono::seconds(5)));
+    assert(!lease.expireResume(leaseNow + std::chrono::seconds(6)));
+    lease.observe("STOPPED"); lease.observe("TRANSITIONING");
+    assert(lease.takeResume(9, 9, leaseNow + std::chrono::seconds(6)));
+    lease.command('u', true);
+    assert(!lease.expireResume(leaseNow + std::chrono::seconds(20)));
+    std::cout << "PASS: resume lease expires after five seconds without strm u; a new device resume can retry\n";
+
     using Unpause = ResumeState::Unpause;
     for (bool withStop : {false, true}) {
         ResumeState seek;
