@@ -214,6 +214,40 @@ explicit fallback to UPnP Pause and the previous same-URL resume behavior
 (including HTTP 503 for a speculative held GET). The pause switch is read and
 logged once at startup; invalid values warn and use `stop`.
 
+### How the fix was found
+
+This was a hard one. Finding it took more than nine hours of structured
+troubleshooting over two days (24–25 September 2026), on top of earlier
+attempts that went nowhere.
+
+What made it so difficult:
+
+- **The symptom pointed the wrong way.** The dialog blames our stream
+  ("could not be played"), and Sonos closes our connection right before it
+  appears, so every sign said the bridge was sending something wrong.
+- **Sonos documents none of this.** Why a speaker closes a connection, sends a
+  HEAD request or raises an error is visible only on the wire and in its UPnP
+  events, never in a log.
+- **Every plausible fix failed in its own way.** Answering Sonos's resume
+  request with 503, closing it, leaving it open, sending only a Play, starting
+  the audio at a clean FLAC frame, restarting the stream automatically,
+  dropping chunked encoding: each one changed the details and none of them
+  removed the dialog. A few brought the music back, but the dialog still appeared.
+- **The cause was not in this code at all.** Sonos cannot resume FLAC radio from
+  PAUSED, whoever serves it.
+
+Proving that meant building dedicated tooling first:
+`scripts/device-test.sh` runs fixed scenarios against a real speaker and
+captures the bridge journal, the LMS event stream and status, and the network
+traffic of each run. `scripts/reference-test.sh` with `scripts/reference-relay.py`
+puts known-good sources (a live MP3 station, a headerless FLAC station, a clean
+FLAC file) in front of the same speaker with the same UPnP command. It took at
+least a dozen captured runs, and hours of reading packet captures and
+cross-checking journals, LMS logs and Sonos event notifications, before a plain
+FLAC file served by a minimal relay reproduced the exact same error. Only then
+was it clear that the bridge had never been the problem. That pointed to a
+simple fix: stop instead of pause.
+
 ## Related
 
 [philippe44/LMS-uPnP](https://github.com/philippe44/LMS-uPnP) takes the opposite
