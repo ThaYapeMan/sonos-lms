@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix="sonos-device-script-") as tmp:
     for label, override, contents, recent, unit, full, expected, sources in cases:
         config.write_text(contents + "\n")
         calls.write_text("")
-        env = {**os.environ, "LMS": override, "UNIT": "sonos-squeezebox@Study Room.service",
+        env = {**os.environ, "LMS": override, "UNIT": "sonos-lms@Study Room.service",
                "CONFIG": str(config), "CALLS": str(calls),
                "EXEC_START": "ExecStart={ path=/bridge ; argv[]=/bridge " + unit + " ; ignore_errors=no ; }",
                "RECENT": "LMS server from discovery: " + recent if recent else "unrelated status output",

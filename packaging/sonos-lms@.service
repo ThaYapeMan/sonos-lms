@@ -1,11 +1,11 @@
 [Unit]
-Description=SONOS::Squeezebox player for room %I
+Description=sonos-lms player for room %I
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/sonos-squeezebox/sonos-squeezebox --room=%I
+ExecStart=/opt/sonos-lms/sonos-lms --room=%I
 Restart=on-failure
 RestartSec=5
 

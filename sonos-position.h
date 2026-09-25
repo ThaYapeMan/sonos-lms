@@ -1,10 +1,10 @@
-// SONOS::Squeezebox -- deploy Sonos in a Logitech Media Server (LMS) streaming environment
+// sonos-lms -- deploy Sonos in a Logitech Media Server (LMS) streaming environment
 //
 // Copyright (C) 2026 Jaap van Vliet
 //
-// This file is part of SONOS::Squeezebox.
+// This file is part of sonos-lms.
 //
-// SONOS::Squeezebox is free software: you can redistribute it and/or modify it under the terms of
+// sonos-lms is free software: you can redistribute it and/or modify it under the terms of
 // the GNU General Public License as published by the Free Software Foundation, either version 3
 // of the License, or (at your option) any later version.
 //

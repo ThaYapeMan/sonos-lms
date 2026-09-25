@@ -1,8 +1,8 @@
-// sonos-squeezebox.cpp -- bridges a Sonos zone player into an LMS/squeezelite session
+// sonos-lms.cpp -- bridges a Sonos zone player into an LMS/squeezelite session
 //
 // Copyright (c) 2026 Jaap van Vliet
 //
-// Original implementation for the sonos-squeezebox project. Licensed under
+// Original implementation for the sonos-lms project. Licensed under
 // the GNU General Public License, version 3 or (at your option) any later
 // version, matching the rest of this project. See LICENSE.
 //
@@ -821,7 +821,7 @@ static std::string discoverLmsServer(unsigned timeoutMs = 3000)
     return host;
 }
 
-static std::string readLmsServerFromConfig(const char* path = "/etc/sonos-squeezebox/config")
+static std::string readLmsServerFromConfig(const char* path = "/etc/sonos-lms/config")
 {
     std::ifstream config(path);
     std::string line;
@@ -854,7 +854,7 @@ int main(int argc, char** argv)
     const char* filename = findOption(argc, argv, "--file");
     const char* server = findOption(argc, argv, "--server");
 
-    printf("\n\n| sonos-squeezebox -- bridges a Sonos zone player into an LMS/squeezelite session\n\n\n");
+    printf("\n\n| sonos-lms -- bridges a Sonos zone player into an LMS/squeezelite session\n\n\n");
 
     SONOS::System::Debug(debugLevel);
     gSonos = new SONOS::System(0, onSonosEvent);
@@ -891,7 +891,7 @@ int main(int argc, char** argv)
     } else {
         gServer = readLmsServerFromConfig();
         if (!gServer.empty())
-            printf("LMS server from /etc/sonos-squeezebox/config: %s\n", gServer.c_str());
+            printf("LMS server from /etc/sonos-lms/config: %s\n", gServer.c_str());
         else
             gServer = discoverLmsServer();
     }

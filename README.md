@@ -1,4 +1,4 @@
-# sonos-squeezebox
+# sonos-lms
 
 Make a Sonos speaker behave like a real Logitech Media Server player: synchronisable
 with other Squeezebox players, controllable from any LMS app (Material, iPeng,
@@ -57,7 +57,7 @@ rather than what has merely been decoded.
 
 | Path | What lives there |
 | --- | --- |
-| `sonos-squeezebox.cpp` | Startup: argument parsing, Sonos/LMS discovery, wiring the rest together. |
+| `sonos-lms.cpp` | Startup: argument parsing, Sonos/LMS discovery, wiring the rest together. |
 | `slimproto_sonos.c` | The unmodified upstream `slimproto.c`, plus an interception point for `strm` transport commands. |
 | `output_sonos.c` / `.h` | Squeezelite output backend; silent/non-silent detection, feeds the encoder. |
 | `sbencoder.cpp` / `.h` | FLAC encoding of the decoded PCM, rate-limited relative to real time. |
@@ -75,8 +75,8 @@ sudo apt-get install -y --no-install-recommends \
     make cmake g++ libz-dev libssl-dev libflac++-dev libpulse-dev \
     libasound-dev libvorbis-dev libfaad-dev libmad0-dev libmpg123-dev libsoxr-dev
 
-git clone --recursive https://github.com/ThaYapeMan/sonos-squeezebox.git
-cd sonos-squeezebox
+git clone --recursive https://github.com/ThaYapeMan/sonos-lms.git
+cd sonos-lms
 make
 ```
 
@@ -86,14 +86,14 @@ fact.
 ## Running it
 
 ```
-sonos-squeezebox --room="Living Room" [--ip=<sonos-ip>] [--server=<lms-host>]
+sonos-lms --room="Living Room" [--ip=<sonos-ip>] [--server=<lms-host>]
 ```
 
 | Flag | Meaning |
 | --- | --- |
 | `--room=<name>` | Required. The Sonos room/zone to take over. |
 | `--ip=<address>` | Skip Sonos auto-discovery and talk to this player directly (any player in the household will do -- they share topology). Needed if discovery can't reach the Sonos network. |
-| `--server=<host>` | LMS hostname or IP **only**, not a web-UI port. Precedence: explicit `--server` > `LMS_SERVER=` in `/etc/sonos-squeezebox/config` > automatic UDP broadcast discovery on port 3483 (same subnet only; does not cross routers). |
+| `--server=<host>` | LMS hostname or IP **only**, not a web-UI port. Precedence: explicit `--server` > `LMS_SERVER=` in `/etc/sonos-lms/config` > automatic UDP broadcast discovery on port 3483 (same subnet only; does not cross routers). |
 | `--debug` | Raise noson's own logging verbosity. |
 | `--file=<path>` | Play one local audio file straight to the Sonos speaker, bypassing LMS entirely -- a quick way to check the Sonos connection and encoder in isolation. |
 
@@ -103,9 +103,9 @@ The first instance binds port 1400 for its own use; a second concurrent instance
 A run looks roughly like this once both sides are found:
 
 ```
-$ sonos-squeezebox --room="Living Room"
+$ sonos-lms --room="Living Room"
 
-sonos-squeezebox -- Sonos as an LMS player
+sonos-lms -- Sonos as an LMS player
 Copyright (C) 2026 Jaap van Vliet
 
 Discovering Sonos devices ... found 3
@@ -123,7 +123,7 @@ Taking over "Living Room" (MAC 34:7E:5C:1A:90:20) ... connected to LMS
 
 ### Installing room services
 
-Run from the deployment checkout at `/opt/sonos-squeezebox`, with root privileges
+Run from the deployment checkout at `/opt/sonos-lms`, with root privileges
 for the installer (or `make install`). First deployment:
 
 ```sh
@@ -133,7 +133,7 @@ sudo scripts/install-devices.sh "Room One" "Room Two"
 
 The LMS address is optional. Add `--server=<lms-host>` when broadcast discovery
 cannot reach LMS, for example across VLANs. This saves the override in
-`/etc/sonos-squeezebox/config`:
+`/etc/sonos-lms/config`:
 
 ```ini
 # Optional LMS override
@@ -146,7 +146,7 @@ existing override; remove or empty `LMS_SERVER=` to return to discovery. If star
 finds no server, squeezelite still retries its own discovery for core playback;
 metadata and Sonos-app pause/play relay need a resolved server and a restart.
 
-Rooms are remembered in `/etc/sonos-squeezebox/rooms`, one per line. Quote names
+Rooms are remembered in `/etc/sonos-lms/rooms`, one per line. Quote names
 containing spaces; the installer handles systemd escaping. Subsequent updates,
 with root privileges for `make install`:
 
@@ -235,7 +235,7 @@ PlayStream failures retry up to three attempts, one second apart, then wait for
 a new stream or transport command. A stream is complete only after success.
 A device-resume request expires after five seconds without LMS `strm u`, allowing
 another attempt; CLI errors retain that lease instead of retrying every poll.
-No environment overrides are needed. `SONOS_SQUEEZEBOX_PAUSE=pause` remains an
+No environment overrides are needed. `SONOS_LMS_PAUSE=pause` remains an
 explicit fallback to UPnP Pause and the previous same-URL resume behavior
 (including HTTP 503 for a speculative held GET). The pause switch is read and
 logged once at startup; invalid values warn and use `stop`.

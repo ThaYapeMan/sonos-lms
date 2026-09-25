@@ -139,7 +139,7 @@ finish() {
 have curl || fail "curl is required (apt install curl)"
 have python3 || fail "python3 is required (apt install python3)"
 [[ -n $HOST_IP ]] || fail "cannot determine this host's IP; set HOST_IP="
-UNIT=$(systemd-escape --template=sonos-squeezebox@.service -- "$ROOM" 2>/dev/null || echo "sonos-squeezebox@$ROOM.service")
+UNIT=$(systemd-escape --template=sonos-lms@.service -- "$ROOM" 2>/dev/null || echo "sonos-lms@$ROOM.service")
 
 say "Probing $SOURCE_NAME ..."
 probe=$(python3 "$HERE/reference-relay.py" --probe "${SOURCE[@]}") || fail "source not usable: $probe"

@@ -5,7 +5,7 @@ only: the user pulls, builds, and restarts the service; agents never deploy or
 SSH there. Capture a fresh journal throughout this single-track test:
 
 ```bash
-journalctl -fu 'sonos-squeezebox@Sonos\x20Port.service' -o short-precise
+journalctl -fu 'sonos-lms@Sonos\x20Port.service' -o short-precise
 ```
 
 A stream N is an HTTP delivery generation established by LMS `strm s`, not a
@@ -51,7 +51,7 @@ by connection-based PCM anchoring; physically recheck position as described belo
    position without an intervening `UPnP Pause` or device stop. Separately issue
    a genuine LMS stop with no following s: expect
    `strm q -> UPnP Stop (400 ms elapsed, pause=stop)` after approximately 400 ms.
-   With explicit `SONOS_SQUEEZEBOX_PAUSE=pause`, expect UPnP Pause instead. The HTTP
+   With explicit `SONOS_LMS_PAUSE=pause`, expect UPnP Pause instead. The HTTP
    response ends immediately on q in both cases.
 4. **(d) Sonos-app pause/play — defect J acceptance.** Test an immediate Play
    and a full 30-second pause. Expect `Device-initiated pause -> LMS pause`,
@@ -97,7 +97,7 @@ it does not mean STANDBY. In the default Stop mode a detected device resume feed
 that GET normally. It allows five seconds for play → LMS CLI → strm u → PCM,
 then returns HTTP 503 if no audio arrives. Pause ends the active response and
 silently disconnects existing standbys without promotion. Later GETs can wait
-for resume audio on the same ID. With the explicit `SONOS_SQUEEZEBOX_PAUSE=pause`
+for resume audio on the same ID. With the explicit `SONOS_LMS_PAUSE=pause`
 fallback, a detected device resume instead cancels an unfed held GET with 503
 and reissues PlayStream with the same URL; active audio is never cancelled by
 that hook. This fallback can reproduce the PAUSED FLAC-radio dialog.

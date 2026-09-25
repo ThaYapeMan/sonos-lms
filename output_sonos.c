@@ -2,7 +2,7 @@
 //
 // Copyright (c) 2026 Jaap van Vliet
 //
-// Original implementation for the sonos-squeezebox project. Licensed under
+// Original implementation for the sonos-lms project. Licensed under
 // the GNU General Public License, version 3 or (at your option) any later
 // version, matching the rest of this project. See LICENSE.
 //
@@ -53,7 +53,7 @@ static bool stream_boundary_pending = false;
 static bool position_fix_disabled = false;
 
 // new_squeezebox_stream_id() / get_squeezebox_stream_id() are defined in
-// sonos-squeezebox.cpp, which owns the shared stream-id counter the encoder
+// sonos-lms.cpp, which owns the shared stream-id counter the encoder
 // and streamer also read; this file only signals a boundary, never mints
 // the id itself.
 
@@ -252,7 +252,7 @@ bool test_open(const char* device, unsigned rates[], bool userdef_rates)
 void set_volume(unsigned left, unsigned right)
 {
     // Sonos volume is driven separately over UPnP (see sonos-status.cpp /
-    // sonos-squeezebox.cpp), not through squeezelite's own volume callback.
+    // sonos-lms.cpp), not through squeezelite's own volume callback.
     (void)left;
     (void)right;
 }

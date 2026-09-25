@@ -1,5 +1,5 @@
 *.o
-/sonos-squeezebox
+/sonos-lms
 attic
 *.sh
 

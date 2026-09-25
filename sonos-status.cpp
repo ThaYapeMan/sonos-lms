@@ -2,7 +2,7 @@
 //
 // Copyright (c) 2026 Jaap van Vliet
 //
-// Original implementation for the sonos-squeezebox project. Licensed under
+// Original implementation for the sonos-lms project. Licensed under
 // the GNU General Public License, version 3 or (at your option) any later
 // version, matching the rest of this project. See LICENSE.
 //

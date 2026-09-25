@@ -4,7 +4,7 @@ set -euo pipefail
 fail() { echo "Error: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || fail "Run as root."
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
-[[ -f ./sonos-squeezebox ]] || fail "Missing ./sonos-squeezebox; run make first."
+[[ -f ./sonos-lms ]] || fail "Missing ./sonos-lms; run make first."
 
 server_set=false
 server=''
@@ -19,7 +19,7 @@ for arg in "$@"; do
     esac
 done
 [[ $server != *$'\n'* && $server != *$'\r'* ]] || fail "Server must not contain newlines."
-config_dir=/etc/sonos-squeezebox
+config_dir=/etc/sonos-lms
 rooms_file=$config_dir/rooms
 if [[ ${#rooms[@]} -eq 0 && ! -s $rooms_file ]]; then
     fail "No rooms configured; pass one or more quoted room names."
@@ -55,14 +55,14 @@ fi
 [[ -s $tmp ]] || fail "No rooms configured; pass one or more quoted room names."
 chmod 644 "$tmp"
 mv -- "$tmp" "$rooms_file"
-unit_source=packaging/sonos-squeezebox@.service
-unit_target=/etc/systemd/system/sonos-squeezebox@.service
+unit_source=packaging/sonos-lms@.service
+unit_target=/etc/systemd/system/sonos-lms@.service
 if ! cmp -s -- "$unit_source" "$unit_target"; then
     install -m 644 -- "$unit_source" "$unit_target"
 fi
 systemctl daemon-reload
 while IFS= read -r room; do
-    unit=$(systemd-escape --template=sonos-squeezebox@.service -- "$room")
+    unit=$(systemd-escape --template=sonos-lms@.service -- "$room")
     active=false
     if systemctl is-active --quiet "$unit"; then active=true; fi
     if ! systemctl is-enabled --quiet "$unit" || ! $active; then

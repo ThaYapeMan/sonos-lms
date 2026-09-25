@@ -5,7 +5,7 @@ import os
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-source = (ROOT / "sonos-squeezebox.cpp").read_text()
+source = (ROOT / "sonos-lms.cpp").read_text()
 
 
 def production_function(signature):
@@ -43,4 +43,4 @@ with tempfile.TemporaryDirectory(prefix="sonos-device-resume-") as directory:
     ], check=True)
     for mode in ("stop", "pause"):
         subprocess.run([str(executable)], check=True,
-                       env={**os.environ, "SONOS_SQUEEZEBOX_PAUSE": mode})
+                       env={**os.environ, "SONOS_LMS_PAUSE": mode})

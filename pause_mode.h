@@ -8,12 +8,14 @@
 enum class PauseMode { Pause, Stop };
 inline PauseMode pauseMode() {
     static const PauseMode mode = [] {
-        const char* value = std::getenv("SONOS_SQUEEZEBOX_PAUSE");
+        const char* value = std::getenv("SONOS_LMS_PAUSE");
+        if (!value && (value = std::getenv("SONOS_SQUEEZEBOX_PAUSE")))
+            printf("Warning: SONOS_SQUEEZEBOX_PAUSE is deprecated; use SONOS_LMS_PAUSE\n");
         PauseMode selected = PauseMode::Stop;
         if (value && !std::strcmp(value, "pause")) selected = PauseMode::Pause;
         else if (value && std::strcmp(value, "stop"))
-            printf("Warning: unknown SONOS_SQUEEZEBOX_PAUSE='%s'; using stop\n", value);
-        printf("SONOS_SQUEEZEBOX_PAUSE=%s\n", selected == PauseMode::Stop ? "stop" : "pause");
+            printf("Warning: unknown SONOS_LMS_PAUSE='%s'; using stop\n", value);
+        printf("SONOS_LMS_PAUSE=%s\n", selected == PauseMode::Stop ? "stop" : "pause");
         return selected;
     }();
     return mode;

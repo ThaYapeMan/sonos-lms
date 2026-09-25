@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-source = (ROOT / "sonos-squeezebox.cpp").read_text()
+source = (ROOT / "sonos-lms.cpp").read_text()
 
 
 def production_function(signature):

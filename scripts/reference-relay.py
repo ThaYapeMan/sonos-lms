@@ -74,7 +74,7 @@ def describe(data):
 
 def open_upstream(url, sonos_headers):
     req = urllib.request.Request(url)
-    req.add_header("User-Agent", "sonos-squeezebox-reference-relay/1")
+    req.add_header("User-Agent", "sonos-lms-reference-relay/1")
     icy = sonos_headers.get("Icy-MetaData") or sonos_headers.get("icy-metadata")
     if icy:
         req.add_header("Icy-MetaData", icy)
