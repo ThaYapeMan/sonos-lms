@@ -272,17 +272,6 @@ void SBStreamer::UnregisterResource(const std::string& uri)
     (void)uri;
 }
 
-// Send one HTTP chunk immediately: hex-size CRLF data CRLF.
-// WSRequestReply buffers blocks until its chunk buffer fills; that delays audio.
-bool SBStreamer::sendChunk(handle* h, const char* data, size_t size)
-{
-    char hdr[16];
-    int hlen = snprintf(hdr, sizeof(hdr), "%x\r\n", (unsigned)size);
-    return h->broker->ReplyData(hdr, hlen)
-        && h->broker->ReplyData(data, size)
-        && h->broker->ReplyData("\r\n", 2);
-}
-
 void SBStreamer::streamSqueezeBox(handle* handle, int stream)
 {
     printf("Sonos requested stream %d\n", stream);
@@ -428,11 +417,36 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
         request->serving = true;
         if (heldResume) printf("held resume GET #%llu fed\n", request->id);
         printf("stream %d: serving current generation with fresh FLAC header\n", stream);
-        if (handle->broker->ReplyData(streamingHeaders.c_str(), streamingHeaders.size()) && sendChunk(handle, buf, r)) {
-            while (!IsAborted() && (r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed)) > 0) {
-                if (!sendChunk(handle, buf, r)) break;
+        const auto responseStarted = std::chrono::steady_clock::now();
+        size_t sent = 0;
+        bool sendFailed = false;
+        auto send = [&](const char* data, size_t size) {
+            if (sendFailed) return false;
+            errno = 0;
+            if (handle->broker->ReplyData(data, size)) {
+                sent += size;
+                return true;
             }
-            handle->broker->ReplyData("0\r\n\r\n", 5);
+            const int error = errno; // capture before logging or cleanup changes it
+            sendFailed = true;
+            const double seconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - responseStarted).count();
+            printf("stream %d: send to Sonos failed after %.1f s (%s; errno=%d; "
+                   "%zu bytes confirmed sent, partial failed write uncounted)\n",
+                stream, seconds, error ? strerror(error) : "short write or closed socket",
+                error, sent);
+            return false;
+        };
+        auto sendChunk = [&](const char* data, size_t size) {
+            char header[16];
+            int length = snprintf(header, sizeof(header), "%x\r\n", (unsigned)size);
+            return send(header, length) && send(data, size) && send("\r\n", 2);
+        };
+        if (send(streamingHeaders.c_str(), streamingHeaders.size()) && sendChunk(buf, r)) {
+            while (!IsAborted() && (r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed)) > 0) {
+                if (!sendChunk(buf, r)) break;
+            }
+            send("0\r\n\r\n", 5);
         }
     }
     if (peerClosed()) printf("stream %d: client closed connection\n", stream);

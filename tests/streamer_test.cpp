@@ -10,6 +10,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstring>
+#include <cerrno>
 #include <future>
 #include <iostream>
 #include <mutex>
@@ -77,7 +78,7 @@ public:
         memcpy(buf, input.data() + offset, n); offset += n; return n;
     }
     bool SendData(const char* data, size_t n) override {
-        if (drop || clientClosed.load() || sendError.load()) return false;
+        if (drop || clientClosed.load() || sendError.load()) { errno = ECONNRESET; return false; }
         wire.append(data, n);
         if (n == 5 && memcmp(data, "0\r\n\r\n", 5) == 0) {
             assert(!disconnected); eof = true; return true;
@@ -367,6 +368,15 @@ static void sessionTest() {
 }
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "send-error") {
+        SBStreamer broker;
+        Socket broken(1);
+        broken.sendError = true;
+        serve(broker, broken);
+        assert(broken.disconnected && broken.wire.empty());
+        puts("PASS: failing socket ends response");
+        return 0;
+    }
     if (argc > 1 && std::string(argv[1]) == "session") { sessionTest(); return 0; }
     if (argc > 1 && std::string(argv[1]) == "shutdown") {
         paused = true;

@@ -42,7 +42,6 @@ private:
     ResourceList m_resources;
 
     void streamSqueezeBox(handle* handle, int stream);
-    static bool sendChunk(handle* h, const char* data, size_t size);
 
     void Reply400(handle* handle);
 

@@ -52,6 +52,7 @@ encoder-test: tests/encoder_test.cpp sbencoder.cpp sbencoder.h noson/noson/libno
 
 test: position-test encoder-test resume-state-test streamer-test
 	./position-test
+	python3 tests/send_error_test.py
 	./streamer-test session
 	./streamer-test position
 	./streamer-test shutdown
