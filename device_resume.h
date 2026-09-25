@@ -1,6 +1,7 @@
 #ifndef DEVICE_RESUME_H
 #define DEVICE_RESUME_H
 
+#include "pause_mode.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -36,6 +37,10 @@ inline DeviceResume deviceResumeStrategy() {
                 printf("Warning: unknown SONOS_SQUEEZEBOX_DEVICE_RESUME='%s'; using sameurl-503\n", value);
         }
         printf("SONOS_SQUEEZEBOX_DEVICE_RESUME=%s\n", deviceResumeName(selected));
+        if (pauseMode() == PauseMode::Stop) {
+            if (value) printf("SONOS_SQUEEZEBOX_DEVICE_RESUME ignored while SONOS_SQUEEZEBOX_PAUSE=stop\n");
+            return DeviceResume::SameURL503; // disable all experimental resume paths
+        }
         return selected;
     }();
     return mode;

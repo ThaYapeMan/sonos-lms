@@ -9,6 +9,7 @@ public:
     enum class Unpause { None, NewStream, FeedHeldGet, SameURL };
 
     Unpause command(char command, bool responseOpen = false) {
+        if (command == 's' || command == 'q') clearStoppedPause();
         Unpause action = Unpause::None;
         if (command == 'u') {
             // Decide before clearing the device-resume request. Exactly one
@@ -37,6 +38,12 @@ public:
 
     // Returns true only for a device pause not already commanded by LMS.
     bool observe(const std::string& state) {
+        if (state == "STOPPED" && stoppedPauseId) {
+            sawPause = true;
+            sawStoppedPause = true;
+            transitioning = false;
+            return false;
+        }
         if (state == "PAUSED_PLAYBACK") {
             if (awaitingPlay) return false; // cached pause after an LMS unpause
             bool relay = !sawPause && !paused && !expectedPause;
@@ -46,7 +53,12 @@ public:
         }
         if (state == "PLAYING" || state == "TRANSITIONING") {
             transitioning = sawPause;
-            if (state == "PLAYING") awaitingPlay = false;
+            if (state == "PLAYING") {
+                awaitingPlay = false;
+                // Keep the observed transition available for takeResume(),
+                // including when PLAYING arrives before the fresh GET.
+                if (sawStoppedPause) stoppedPauseId = 0;
+            }
         }
         else
             transitioning = false;
@@ -60,11 +72,26 @@ public:
         return true;
     }
 
-    void streamStarted() { newStreamPending = false; }
+    void streamStarted() { newStreamPending = false; clearStoppedPause(); }
+
+    void stopForPause(unsigned stream) {
+        stoppedPauseId = stream;
+        sawStoppedPause = sawPause = transitioning = requested = false;
+    }
+    bool stoppedForPause(unsigned stream) const { return stream && stoppedPauseId == stream; }
+
 
     void retryResume() { requested = false; }
 
 private:
+    void clearStoppedPause() {
+        if (stoppedPauseId || sawStoppedPause)
+            sawPause = transitioning = requested = false;
+        stoppedPauseId = 0;
+        sawStoppedPause = false;
+    }
+    unsigned stoppedPauseId = 0;
+    bool sawStoppedPause = false;
     bool newStreamPending = false;
     bool pausedBeforeStop = false;
     bool awaitingPlay = false;

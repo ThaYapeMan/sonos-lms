@@ -234,6 +234,26 @@ metadata with a HEAD request, GET closure, and `ERROR_CORRUPT_FILE` / `STOPPED`.
 This decoder-continuation hypothesis is superseded by the MP3 reference finding
 below. The mode remains available for comparison.
 
+`SONOS_SQUEEZEBOX_PAUSE=pause|stop` selects how LMS `strm p` pauses the
+speaker (default `pause`). The value is read and logged once at startup;
+invalid values warn and use `pause`. With `stop`, the bridge ends the HTTP
+response first, then sends UPnP Stop and logs `strm p -> UPnP Stop (pause=stop)`.
+This also applies to the LMS pause relayed from a Sonos-app pause. The deferred
+400 ms `strm q` path continues to use Pause.
+
+Stop-for-pause is remembered for the current stream. STOPPED is idle in that
+state: it sends nothing to LMS and does not restart playback. A subsequent
+STOPPED → TRANSITIONING/PLAYING is a device resume: the bridge asks LMS to play
+and feeds Sonos's fresh GET with normal chunked FLAC, including its header.
+An LMS unpause without an open GET uses PlayStream with the same URL. The marker
+clears on a new stream, `strm s/q`, or resumed PLAYING; it is not persisted.
+
+With `pause=stop`, DEVICE_RESUME strategies are ignored (logged once if set),
+and RESUME_BODY/RESUME_TRANSFER do not alter the fresh resume GET. For physical
+testing, remove those experiment settings and use only
+`Environment="SONOS_SQUEEZEBOX_PAUSE=stop"` in the service drop-in. This avoids
+resuming a PAUSED FLAC radio decoder by leaving the speaker STOPPED instead.
+
 `feed-restart` keeps and feeds Sonos's own device-resume GET with normal FLAC
 metadata by default, without invalidation, a server-induced close, PlayStream, or Play at
 that point. It logs `device resume: strategy=feed-restart feeding Sonos's own

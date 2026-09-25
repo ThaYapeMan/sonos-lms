@@ -184,6 +184,9 @@ extern "C" void sonos_lms_transport(char command)
         std::lock_guard<std::mutex> lock(resumeMutex);
         responseOpen = command == 'u' && squeezebox_response_open(streamId.load());
         unpause = resumeState.command(command, responseOpen);
+        if (pauseMode() == PauseMode::Stop && responseOpen
+            && unpause == ResumeState::Unpause::SameURL)
+            unpause = ResumeState::Unpause::FeedHeldGet;
     }
     // Heartbeats still pass through ResumeState, but need no decision log.
     if (command != 't') {
@@ -294,6 +297,8 @@ extern "C" void sonos_lms_transport(char command)
             printf("strm u after ended response -> PlayStream(same URL)\n");
         else if (missing)
             printf("strm u without open response -> PlayStream(same URL)\n");
+        else if (pause && pauseMode() == PauseMode::Stop)
+            printf("strm p -> UPnP Stop (pause=stop)\n");
         else
             printf("strm %c -> UPnP %s\n", command, pause ? "Pause" : "Play");
         bool ok;
@@ -306,10 +311,15 @@ extern "C" void sonos_lms_transport(char command)
             // End the response first, regardless of whether Pause succeeds.
             if (pause) end_squeezebox_response();
             auto upnpStart = std::chrono::steady_clock::now();
-            ok = pause ? gPlayer->Pause() : gPlayer->Play();
+            const bool stopForPause = pause && pauseMode() == PauseMode::Stop;
+            if (stopForPause) {
+                std::lock_guard<std::mutex> stateLock(resumeMutex);
+                resumeState.stopForPause(streamId.load());
+            }
+            ok = pause ? (stopForPause ? gPlayer->Stop() : gPlayer->Pause()) : gPlayer->Play();
             auto upnpMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - upnpStart).count();
-            printf("gPlayer->%s took %lldms\n", pause ? "Pause" : "Play", (long long)upnpMs);
+            printf("gPlayer->%s took %lldms\n", pause ? (stopForPause ? "Stop" : "Pause") : "Play", (long long)upnpMs);
         }
         if (!ok) printf("strm %c: device transport command failed\n", command);
     }
@@ -864,6 +874,7 @@ static std::string readLmsServerFromConfig(const char* path = "/etc/sonos-squeez
 int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);
+    (void)pauseMode();
     (void)deviceResumeStrategy();
     (void)resumeResponseSettings();
 

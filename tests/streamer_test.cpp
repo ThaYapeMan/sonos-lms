@@ -52,7 +52,8 @@ void ResumeSqueezeBox(unsigned id) {
     if (pendingResume && std::chrono::steady_clock::now() >= resumeAt) {
         // Simulate LMS receiving CLI play and answering with strm u, not s.
         assert(state.command('u', squeezebox_response_open(id)) == ResumeState::Unpause::SameURL);
-        if (deviceResumeStrategy() == DeviceResume::PlayOnlyFrames)
+        if (pauseMode() == PauseMode::Stop) { /* feed the fresh GET normally */ }
+        else if (deviceResumeStrategy() == DeviceResume::PlayOnlyFrames)
             prepare_squeezebox_frames_resume(id);
         else if (deviceResumeStrategy() == DeviceResume::FeedRestart)
             prepare_squeezebox_feed_restart_resume(id);
@@ -63,7 +64,7 @@ void ResumeSqueezeBox(unsigned id) {
         paused = false;
         // Model PlayStream(same URL): the test's device opens a fresh GET.
         // The cancelled held request closes before the device reconnects.
-        if (deviceResumeStrategy() != DeviceResume::PlayOnlyFrames
+        if (pauseMode() != PauseMode::Stop && deviceResumeStrategy() != DeviceResume::PlayOnlyFrames
             && deviceResumeStrategy() != DeviceResume::FeedRestart) ++sameURLRequests;
     }
 }
@@ -419,7 +420,37 @@ static void feedRestartStreamTest() {
     puts("PASS: feed-restart GET receives FLAC/data, HEAD leaves it open, client closes, STOPPED precedes fresh playable same-ID GET");
 }
 
+static void stopPauseStreamTest() {
+    SBStreamer broker;
+    Socket initial(1);
+    connection(broker, initial, 1900);
+    playable(initial, 1900);
+    state.command('s'); state.observe("PLAYING");
+    state.command('p'); state.stopForPause(1); state.observe("STOPPED");
+    paused = true; deviceState = "STOPPED";
+    Socket resume(1, false, true);
+    auto get = std::async(std::launch::async, [&] { serve(broker, resume); });
+    waitUntil([] { return squeezebox_response_open(1); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    assert(!resume.headersSent && resumeCommands == 0);
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        deviceState = "TRANSITIONING";
+    }
+    waitUntil([] { return !paused.load(); });
+    assert(resumeCommands == 1 && sameURLRequests == 0);
+    feed(1950);
+    waitUntil([&] { return resume.audioSeen.load(); });
+    assert(!resume.eof && !resume.disconnected);
+    resume.clientClosed = true;
+    ready(get);
+    playable(resume, 1950);
+    assert(resume.headers.find("Transfer-Encoding: chunked") != std::string::npos);
+    puts("PASS: stop-for-pause fresh resume GET has normal FLAC header and chunked audio despite frames/raw settings");
+}
+
 int main(int argc, char**) {
+    if (pauseMode() == PauseMode::Stop) { stopPauseStreamTest(); return 0; }
     if (deviceResumeStrategy() == DeviceResume::FeedRestart) { feedRestartStreamTest(); return 0; }
     if (deviceResumeStrategy() == DeviceResume::PlayOnlyFrames) { framesResumeTest(); return 0; }
     if (argc > 1) { modeTest(); return 0; }
