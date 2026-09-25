@@ -24,7 +24,7 @@ static std::mutex stateMutex;
 static ResumeState state;
 static std::string deviceState = "PLAYING";
 static unsigned resumeDelayMs = 0;
-static bool pendingResume = false, restartOnResume = false;
+static bool pendingResume = false, manualResume = false;
 static std::chrono::steady_clock::time_point resumeAt;
 extern "C" unsigned get_lms_stream_serial() { return generation.load(); }
 extern "C" unsigned get_squeezebox_stream_id() { return generation.load(); }
@@ -35,6 +35,8 @@ extern "C" uint64_t get_sb_time_ms() {
 }
 extern "C" void encode_squeezebox_audio(const char*, int, uint64_t firstFrame = 0);
 extern "C" void end_squeezebox_response(void);
+extern "C" void flush_squeezebox_response(void);
+extern "C" void hold_squeezebox_resume(unsigned stream);
 extern "C" int squeezebox_response_ended(unsigned stream);
 extern "C" int squeezebox_response_open(unsigned stream);
 extern "C" void acknowledge_squeezebox_resume(unsigned stream);
@@ -44,16 +46,12 @@ void ResumeSqueezeBox(unsigned id) {
     std::lock_guard<std::mutex> lock(stateMutex);
     state.observe(deviceState);
     if (state.takeResume(id, generation)) {
+        if (state.stopResumeRequested()) hold_squeezebox_resume(id);
         ++resumeCommands;
         pendingResume = true;
         resumeAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(resumeDelayMs);
     }
-    if (pendingResume && std::chrono::steady_clock::now() >= resumeAt) {
-        if (restartOnResume) {
-            state.command('s'); ++generation; state.streamStarted();
-            pendingResume = false; paused = false;
-            return;
-        }
+    if (!manualResume && pendingResume && std::chrono::steady_clock::now() >= resumeAt) {
         // Simulate LMS receiving CLI play and answering with strm u, not s.
         assert(state.command('u', squeezebox_response_open(id)) == ResumeState::Unpause::SameURL);
         if (pauseMode() == PauseMode::Pause) invalidate_squeezebox_held_get(id);
@@ -237,28 +235,91 @@ static void stopPauseStreamTest(char command) {
     feed(1950);
     waitUntil([&] { return resume.audioSeen.load(); });
     assert(!resume.eof && !resume.disconnected);
-    resume.clientClosed = true;
+    flush_squeezebox_response(); // once fed, this is ordinary playing audio
     ready(get);
+    assert(resume.eof && resume.disconnected);
     playable(resume, 1950);
     assert(resume.headers.find("Transfer-Encoding: chunked") != std::string::npos);
     puts("PASS: stop-for-pause fresh resume GET has normal FLAC header and chunked audio after STOPPED");
 }
 
-static void stoppedRestartTest() {
+static void heldResumeRestartTest(char stopCommand, const std::string& outcome, bool flush = true) {
     SBStreamer broker;
-    state = ResumeState{}; resumeCommands = 0;
-    state.command('q'); state.stopForPause(1); state.observe("STOPPED");
-    paused = true; deviceState = "TRANSITIONING"; restartOnResume = true;
-    Socket old(1);
-    serve(broker, old);
-    assert(resumeCommands == 1 && generation == 2);
-    assert(old.headers.find("302 Found") != std::string::npos);
-    assert(old.headers.find("Location: " + SqueezeBoxURL(2)) != std::string::npos);
-    assert(old.body.empty());
-    Socket current(2);
-    connection(broker, current, 1960);
-    playable(current, 1960);
-    puts("PASS: LMS restart after q-Stop redirects held GET to fresh playable generation without 503");
+    const unsigned oldId = generation;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        state = ResumeState{}; resumeCommands = 0; pendingResume = false;
+        state.command(stopCommand); state.stopForPause(oldId); state.observe("STOPPED");
+        paused = true; deviceState = "TRANSITIONING"; manualResume = true;
+    }
+    Socket old(oldId, false, true);
+    auto start = std::chrono::steady_clock::now();
+    auto held = std::async(std::launch::async, [&] { serve(broker, old); });
+    waitUntil([] { return resumeCommands == 1; });
+    if (flush) {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        state.command('q'); paused = true;
+        flush_squeezebox_response(); // S7: before s and before a new ID exists
+    }
+    assert(held.wait_for(std::chrono::milliseconds(60)) == std::future_status::timeout);
+    assert(!old.headersSent && squeezebox_response_open(oldId));
+    if (outcome != "expired" && outcome != "fed") {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        state.command('s'); paused = false;
+    }
+    assert(held.wait_for(std::chrono::milliseconds(70)) == std::future_status::timeout);
+    assert(!old.headersSent && generation == oldId);
+    if (outcome == "302") {
+        { std::lock_guard<std::mutex> lock(stateMutex); ++generation; state.streamStarted(); }
+        ready(held);
+        assert(old.headers.find("302 Found") != std::string::npos);
+        assert(old.headers.find("Location: " + SqueezeBoxURL(generation)) != std::string::npos);
+        assert(old.headers.find("503") == std::string::npos && old.body.empty());
+        Socket current(generation);
+        connection(broker, current, 1960);
+        playable(current, 1960);
+    } else if (outcome == "closed") {
+        old.clientClosed = true; ready(held);
+        assert(old.wire.empty()); // no HTTP error that can produce a device status error
+    } else if (outcome == "fed") {
+        {
+            std::lock_guard<std::mutex> lock(stateMutex);
+            state.command('u', true); paused = false;
+            acknowledge_squeezebox_resume(oldId);
+        }
+        feed(1961); waitUntil([&] { return old.audioSeen.load(); });
+        old.clientClosed = true; ready(held); playable(old, 1961);
+    } else {
+        assert(held.wait_for(std::chrono::seconds(6)) == std::future_status::ready);
+        held.get();
+        auto elapsed = std::chrono::steady_clock::now() - start;
+        assert(elapsed >= std::chrono::seconds(5) && elapsed < std::chrono::milliseconds(5500));
+        assert(old.headers.find("503 Service Unavailable") != std::string::npos && old.body.empty());
+    }
+    assert(resumeCommands == 1);
+    pendingResume = false; manualResume = false; paused = false;
+    std::cout << "PASS: " << stopCommand << "-Stop held resume, " << (flush ? "q flush" : "s only")
+              << " before new ID -> " << outcome << "; one LMS play\n";
+}
+
+static void normalFlushTest() {
+    SBStreamer broker;
+    state = ResumeState{}; resumeCommands = 0; paused = false;
+    Socket playing(generation, false, true);
+    auto get = std::async(std::launch::async, [&] { serve(broker, playing); });
+    waitUntil([&] { return playing.headersSent.load(); });
+    feed(1962); waitUntil([&] { return playing.audioSeen.load(); });
+    state.command('q'); paused = true; flush_squeezebox_response();
+    ready(get);
+    assert(playing.eof && playing.disconnected && resumeCommands == 0);
+    Socket probe(generation);
+    auto held = std::async(std::launch::async, [&] { serve(broker, probe); });
+    waitUntil([] { return squeezebox_response_open(generation); });
+    flush_squeezebox_response(); ready(held);
+    assert(probe.headers.find("503 Service Unavailable") != std::string::npos);
+    assert(resumeCommands == 0);
+    paused = false;
+    puts("PASS: ordinary q still ends playing HTTP with EOF and unclassified waiting GET with 503");
 }
 
 static void sessionTest() {
@@ -330,7 +391,16 @@ int main(int argc, char** argv) {
         puts("PASS: real streamer/encoder anchors the first PCM of a same-stream GET and resets for a new stream");
         return 0;
     }
-    if (pauseMode() == PauseMode::Stop) { stopPauseStreamTest('p'); stopPauseStreamTest('q'); stoppedRestartTest(); return 0; }
+    if (pauseMode() == PauseMode::Stop) {
+        stopPauseStreamTest('p'); stopPauseStreamTest('q');
+        for (char command : {'q', 'p'}) {
+            heldResumeRestartTest(command, "302");
+            heldResumeRestartTest(command, "closed");
+            heldResumeRestartTest(command, "fed");
+        }
+        heldResumeRestartTest('q', "302", false);
+        heldResumeRestartTest('q', "expired");
+        normalFlushTest(); return 0; }
 
     setvbuf(stdout, nullptr, _IOLBF, 0);
     SBStreamer broker;

@@ -141,3 +141,12 @@ Press Play in the app: expect one LMS `play`, fresh FLAC audio on the held GET
 (or a redirect to the new stream if LMS restarts the track), no 503, and no app
 dialog. Record speaker state, LMS mode and now-playing after 15 seconds. S7 is
 not yet physically verified and is excluded from the default scenarios 1–6.
+
+S7 evidence from `sonos-test-20260925-160545` (9e47596) showed q-Stop worked,
+but LMS's restart q ended held GET #58 with 503 before s allocated stream 11;
+audio resumed with ERROR_NO_RESOURCE and an app dialog. Recheck with the fix:
+the classified held resume must survive q/s, then log `held resume GET #N -> 302
+stream M` or `closed by client`. Same-stream u logs `fed`. Only an unanswered
+five-second hold logs `expired` and retains the prior 503 fallback. Local tests
+reproduce the gap between q, s and ID allocation for both p-Stop and q-Stop;
+physical status and absence of a dialog still require S7 on the speaker.

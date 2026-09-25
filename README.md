@@ -218,7 +218,12 @@ LMS position continues across reconnects. LMS stop (`strm q`) ends HTTP immediat
 and sends Stop after 400 ms unless superseded by `strm s`; track changes send no
 transport command. STOPPED itself never resumes LMS. Sonos-app Play sends one
 LMS `play` per resume attempt and feeds the fresh GET; if LMS starts a new stream,
-the waiting GET redirects to it. Explicit `pause=pause` retains deferred Pause.
+the waiting GET survives LMS's q/s flush and redirects when the new ID exists.
+Only a GET classified as a device resume after Stop gets this protection;
+ordinary q still ends the response. A held resume sends no bytes if the client
+closes it, or returns the existing 503 after its five-second deadline. Each
+outcome is logged as `held resume GET #N` followed by `-> 302 stream M`, `fed`,
+`closed by client`, or `expired`. Explicit `pause=pause` retains deferred Pause.
 Physical scenario 7 is opt-in (`SCENARIOS=7 scripts/device-test.sh`) until verified;
 the default remains scenarios 1–6.
 LMS pause/play intent is retained while a transport call or stream restart is

@@ -74,6 +74,10 @@ static void end_squeezebox_response() {
     responseOpen = false;
     responseEnded = true;
 }
+static void flush_squeezebox_response() { end_squeezebox_response(); }
+static void hold_squeezebox_resume(unsigned id) {
+    assert(id == streamId && resumeState.stopResumeRequested());
+}
 static void acknowledge_squeezebox_resume(unsigned id) { assert(id == 6); responseEnded = false; }
 static void invalidate_squeezebox_held_get(unsigned id) {
     assert(id == 6);

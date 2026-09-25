@@ -25,6 +25,7 @@
 #include "sbencoder.h"
 #include "sonos-position.h"
 
+#include <atomic>
 #include <cstring>
 #include <algorithm>
 #include <cerrno>
@@ -58,6 +59,9 @@ struct StreamRequest {
     std::shared_ptr<SBEncoder> encoder;
     bool opened = false;
     bool pauseEnded = false;
+    std::atomic<bool> heldResume{false};
+    std::atomic<bool> resumeAcknowledged{false};
+    std::atomic<bool> serving{false};
 };
 static unsigned long long nextRequestId = 0;
 static unsigned ownershipStream = 0;
@@ -85,19 +89,33 @@ extern "C" unsigned get_lms_stream_serial(void);
 extern "C" int sonos_lms_is_paused(void);
 extern "C" int sonos_output_running(void);
 
-extern "C" {
 // Signal only the HTTP lifetime. Its worker sends EOF and retains the encoder
 // until the next same-ID GET replaces it. No generation or FLAC close here.
-void end_squeezebox_response(void)
+static void endSqueezeboxResponse(bool flush)
 {
     std::lock_guard<std::mutex> lock(g_enc_mutex);
     endedByPause = get_squeezebox_stream_id();
-    if (g_enc && g_enc->streamId() == endedByPause) g_enc->endResponse();
+    const bool preserve = flush && activeRequest && activeRequest->heldResume
+        && !activeRequest->serving;
+    if (preserve) activeRequest->resumeAcknowledged = false;
+    if (!preserve && g_enc && g_enc->streamId() == endedByPause) g_enc->endResponse();
     // A pause ends existing requests, not a handoff to a standby. Standbys
     // have sent no headers and disconnect silently; later GETs may wait for PCM.
     for (auto& request : standbyRequests)
         request->pauseEnded = true;
     standbyRequests.clear();
+}
+
+extern "C" {
+void end_squeezebox_response(void) { endSqueezeboxResponse(false); }
+void flush_squeezebox_response(void) { endSqueezeboxResponse(true); }
+
+void hold_squeezebox_resume(unsigned stream)
+{
+    std::lock_guard<std::mutex> lock(g_enc_mutex);
+    if (activeRequest && activeRequest->stream == stream && !activeRequest->encoder->hasAudio()
+        && !activeRequest->encoder->responseEnded() && !activeRequest->encoder->cancelled())
+        activeRequest->heldResume = true;
 }
 
 int squeezebox_response_open(unsigned stream)
@@ -117,6 +135,8 @@ void acknowledge_squeezebox_resume(unsigned stream)
 {
     std::lock_guard<std::mutex> lock(g_enc_mutex);
     if (endedByPause == stream) endedByPause = 0;
+    if (activeRequest && activeRequest->stream == stream)
+        activeRequest->resumeAcknowledged = true;
 }
 
 void invalidate_squeezebox_held_get(unsigned stream)
@@ -367,30 +387,46 @@ void SBStreamer::streamSqueezeBox(handle* handle, int stream)
 
     // Only ACTIVE gets an encoder and headers. A held GET still means an
     // ACTIVE request waiting for PCM while LMS is paused, never a standby.
-    bool waitForResumeAudio = sonos_lms_is_paused();
+    bool waitForResumeAudio = sonos_lms_is_paused() || request->heldResume;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(SBSTREAMER_RESUME_TIMEOUT);
-    while (opened && waitForResumeAudio && !enc->hasAudio() && !enc->cancelled() && !enc->responseEnded() && !IsAborted() && !peerClosed()
+    auto waitingForAudio = [&] {
+        return !enc->hasAudio() || (request->heldResume && !request->resumeAcknowledged);
+    };
+    while (opened && waitForResumeAudio && waitingForAudio() && !enc->cancelled() && !enc->responseEnded() && !IsAborted() && !peerClosed()
            && (unsigned)stream == get_squeezebox_stream_id()
            && std::chrono::steady_clock::now() < deadline) {
-        ResumeSqueezeBox(stream);
+        // A marked resume already sent LMS play. Its q/s reply may clear the
+        // transport state, but must not renew the hold or send another play.
+        if (!request->heldResume) ResumeSqueezeBox(stream);
         usleep(10000);
     }
     char buf[SBSTREAMER_CHUNK];
     int r = 0;
-    if (opened && (!waitForResumeAudio || enc->hasAudio()) && !enc->cancelled())
+    const bool heldResume = request->heldResume;
+    const bool closedResume = heldResume && peerClosed();
+    const bool expiredResume = heldResume && waitingForAudio()
+        && std::chrono::steady_clock::now() >= deadline;
+    if (opened && !closedResume && (!waitForResumeAudio || !waitingForAudio()) && !enc->cancelled())
         r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed);
     bool streamReady = r >= 4 && memcmp(buf, "fLaC", 4) == 0;
     const std::string streamingHeaders = "HTTP/1.1 200 OK\r\nServer: libnoson/" LIBVERSION "\r\nConnection: close\r\n"
         "Content-Type: audio/flac\r\nTransfer-Encoding: chunked\r\n\r\n";
-    if (!streamReady && waitForResumeAudio && (unsigned)stream != get_squeezebox_stream_id()) {
+    if (closedResume) {
+        printf("held resume GET #%llu closed by client\n", request->id);
+    } else if (!streamReady && waitForResumeAudio && (unsigned)stream != get_squeezebox_stream_id()) {
+        if (heldResume)
+            printf("held resume GET #%llu -> 302 stream %u\n", request->id, get_squeezebox_stream_id());
         // LMS play after stop can start a new delivery generation. The held
         // GET follows that URL instead of reporting an audio failure.
         redirect();
     } else if (!streamReady) {
+        if (expiredResume) printf("held resume GET #%llu expired\n", request->id);
         printf("stream %d: no audio before timeout or connection replaced\n", stream);
         std::string error = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         handle->broker->ReplyData(error.c_str(), error.size());
     } else {
+        request->serving = true;
+        if (heldResume) printf("held resume GET #%llu fed\n", request->id);
         printf("stream %d: serving current generation with fresh FLAC header\n", stream);
         if (handle->broker->ReplyData(streamingHeaders.c_str(), streamingHeaders.size()) && sendChunk(handle, buf, r)) {
             while (!IsAborted() && (r = enc->read(buf, sizeof(buf), SBSTREAMER_HTTP_IDLE_TIMEOUT, false, peerClosed)) > 0) {

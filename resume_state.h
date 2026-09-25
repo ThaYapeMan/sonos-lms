@@ -75,6 +75,8 @@ public:
         return true;
     }
 
+    bool stopResumeRequested() const { return stoppedResume && requested; }
+
     void streamStarted() { newStreamPending = false; clearStoppedPause(); }
 
     void stopForPause(unsigned stream) {

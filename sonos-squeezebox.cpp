@@ -83,6 +83,8 @@ static RetryBudget streamStartRetry; // protected by transportMutex
 static unsigned retryStream = 0;
 static uint64_t retryRevision = 0;
 extern "C" void end_squeezebox_response(void);
+extern "C" void flush_squeezebox_response(void);
+extern "C" void hold_squeezebox_resume(unsigned stream);
 extern "C" int squeezebox_response_ended(unsigned stream);
 extern "C" int squeezebox_response_open(unsigned stream);
 extern "C" void acknowledge_squeezebox_resume(unsigned stream);
@@ -244,7 +246,7 @@ extern "C" void sonos_lms_transport(char command)
         return; // decoded track boundary allocates the ID and calls PlaySqueezeBox
     }
     if (command == 'q') {
-        end_squeezebox_response();
+        flush_squeezebox_response();
         std::lock_guard<std::mutex> lock(stopMutex);
         deferredStop.schedule(StopDebounce::Clock::now());
         printf("strm q: deferring %s for 400 ms\n", pauseMode() == PauseMode::Stop ? "Stop" : "Pause");
@@ -285,7 +287,7 @@ static void dispatchDeferredStop()
                         : "strm q -> UPnP Pause (400 ms elapsed)\n");
     if (!(stopForPause ? gPlayer->Stop() : gPlayer->Pause()))
         printf("strm q: device transport command failed\n");
-    end_squeezebox_response();
+    flush_squeezebox_response();
 }
 
 class StopTimer {
@@ -536,6 +538,10 @@ void ResumeSqueezeBox(unsigned requested)
     {
         std::lock_guard<std::mutex> lock(resumeMutex);
         resume = resumeState.takeResume(requested, streamId.load());
+        // Publish the HTTP hold before CLI I/O: LMS can reply with q/s before
+        // sendLmsCommand returns. Status and GET callbacks share this decision.
+        if (requested == streamId.load() && resumeState.stopResumeRequested())
+            hold_squeezebox_resume(requested);
     }
     if (resume) {
         printf("Device-initiated resume: current stream %u\n", requested);
