@@ -1,4 +1,6 @@
 #include "resume_state.h"
+#include "upnp/speaker_control.h"
+static void note_squeezebox_device_close() {}
 #include "transport_intent.h"
 #include "pause_mode.h"
 #include "stop_debounce.h"
@@ -34,6 +36,9 @@ static std::vector<std::string> callOrder;
 struct Transport { std::string state, status; };
 struct FakePlayer {
     Transport property;
+    std::string uri;
+    bool readTransportInfo(upnp::TransportInfo& info) { info.state = property.state; return true; }
+    bool currentUri(std::string& out) { out = uri; return true; }
     Transport transportInfo() { return property; }
     std::string controllerUri() { return "http://bridge"; }
     bool playStream(const std::string& url, const std::string&, const std::string&) {

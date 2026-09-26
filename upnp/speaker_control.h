@@ -35,6 +35,8 @@ public:
     virtual bool stop() = 0;
     // Cached, nonblocking: safe on the HTTP worker. poll() performs own-mode I/O.
     virtual TransportInfo transportInfo() = 0;
+    // Fresh SOAP read for retry reconciliation; never called by HTTP workers.
+    virtual bool readTransportInfo(TransportInfo&) { return false; }
     virtual uint8_t displayVolume() { return 0; }
     virtual bool positionInfo(uint32_t& milliseconds, std::string* text = nullptr) = 0;
     virtual bool currentUri(std::string& uri) = 0;

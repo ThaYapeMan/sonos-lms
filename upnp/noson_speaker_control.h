@@ -16,6 +16,7 @@ public:
     bool pause() override;
     bool stop() override;
     TransportInfo transportInfo() override;
+    bool readTransportInfo(TransportInfo&) override;
     uint8_t displayVolume() override;
     bool positionInfo(uint32_t&, std::string* = nullptr) override;
     bool currentUri(std::string&) override;

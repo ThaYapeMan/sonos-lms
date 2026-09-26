@@ -83,6 +83,7 @@ static RetryBudget streamStartRetry; // protected by transportMutex
 static unsigned retryStream = 0;
 static uint64_t retryRevision = 0;
 extern "C" void end_squeezebox_response(void);
+extern "C" void note_squeezebox_device_close(void);
 extern "C" void flush_squeezebox_response(void);
 extern "C" void hold_squeezebox_resume(unsigned stream);
 extern "C" int squeezebox_response_ended(unsigned stream);
@@ -92,6 +93,7 @@ extern "C" void invalidate_squeezebox_held_get(unsigned stream);
 static std::mutex stopMutex;
 static StopDebounce deferredStop;
 static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition);
+static bool alreadyPlayingCurrentStream(unsigned stream);
 
 extern "C" unsigned get_squeezebox_stream_id(void) { return streamId.load(); }
 extern "C" void new_squeezebox_stream_id(void)
@@ -151,6 +153,7 @@ static void dispatchTransportIntent()
         const bool playStreamAttempt = ended || missing || error;
         if (playStreamAttempt) {
             if (error) printf("device in error state -> re-issuing PlayStream\n");
+            if (intent.retry.count() && alreadyPlayingCurrentStream(streamId.load())) return;
             if (missing) invalidate_squeezebox_held_get(streamId.load());
             intent.retry.begin();
             ok = PlaySqueezeBoxLocked(streamId.load(), false);
@@ -507,13 +510,17 @@ std::string SqueezeBoxURL(unsigned stream_id)
 
 static void ObserveDeviceTransport(const std::string& state)
 {
-    bool relay;
+    bool relay, expectedClose;
+    static std::string previousState;
     {
         std::lock_guard<std::mutex> lock(resumeMutex);
         if (resumeState.expireResume())
             printf("Device-initiated resume lease expired: 5 s without strm u\n");
+        expectedClose = state != previousState && (state == "STOPPED" || state == "PAUSED_PLAYBACK");
+        previousState = state;
         relay = resumeState.observe(state);
     }
+    if (expectedClose) note_squeezebox_device_close();
     if (relay) {
         printf("Device-initiated pause -> LMS pause\n");
         // The device has already paused: promptly deliver EOF even if LMS CLI
@@ -548,6 +555,21 @@ void ResumeSqueezeBox(unsigned requested)
             printf("Device-initiated resume: LMS play failed; retaining 5 s lease\n");
         }
     }
+}
+
+static bool alreadyPlayingCurrentStream(unsigned stream)
+{
+    upnp::TransportInfo info;
+    std::string uri;
+    const auto expected = SqueezeBoxURL(stream);
+    if (expected.empty() || !gPlayer->readTransportInfo(info)
+        || (info.state != "PLAYING" && info.state != "TRANSITIONING")
+        || !gPlayer->currentUri(uri) || uri != expected || stream != streamId.load()) return false;
+    ourStreamStarted.store(true);
+    completedStream.store(stream);
+    acknowledge_squeezebox_resume(stream);
+    printf("PlayStream(stream %u): device already playing current stream; no retry\n", stream);
+    return true;
 }
 
 static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition)
@@ -592,6 +614,10 @@ static void dispatchStreamStart()
         retryRevision = revision;
     }
     if (!streamStartRetry.ready(RetryBudget::Clock::now())) return;
+    if (streamStartRetry.count() && alreadyPlayingCurrentStream(current)) {
+        streamStartRetry.succeeded();
+        return;
+    }
     streamStartRetry.begin();
     if (PlaySqueezeBoxLocked(current, newStream)) {
         streamStartRetry.succeeded();

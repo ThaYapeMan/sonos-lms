@@ -8,8 +8,32 @@ static void retryCases() {
         streamPlays = transportPlays = heldGetInvalidations = 0;
         callOrder.clear(); ourStreamStarted = true; lmsPaused = false;
         testingStreamStart = true; cliResult = true;
+        player.uri.clear();
         player.property = {"STOPPED", "OK"};
     };
+    for (const auto state : {"PLAYING", "TRANSITIONING"}) {
+        reset(); playStreamFailures = 1;
+        dispatchStreamStart();
+        player.property.state = state;
+        player.uri = SqueezeBoxURL(6);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+        dispatchStreamStart();
+        assert(streamPlays == 1 && completedStream == 6);
+    }
+    puts("PASS: ambiguous Play timeout reconciles PLAYING/TRANSITIONING on exact session URL without retry");
+    reset(); playStreamFailures = 1;
+    dispatchStreamStart(); player.property.state = "PLAYING";
+    player.uri = "http://bridge/music/squeezebox.flac?session=previous&stream=6";
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    dispatchStreamStart(); assert(streamPlays == 2 && completedStream == 6);
+    puts("PASS: playing another session does not suppress PlayStream retry");
+    reset(); testingStreamStart = false; completedStream = 6; playStreamFailures = 1;
+    sonos_lms_transport('u');
+    player.property.state = "PLAYING"; player.uri = SqueezeBoxURL(6);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    dispatchTransportIntent();
+    assert(streamPlays == 1 && heldGetInvalidations == 1 && !transportIntent.pending);
+    puts("PASS: same-URL retry reconciles before invalidating a live response");
     reset(); playStreamFailures = 1;
     dispatchStreamStart();
     assert(streamPlays == 1 && completedStream == 5);

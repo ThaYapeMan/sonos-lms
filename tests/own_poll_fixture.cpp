@@ -23,6 +23,7 @@ static bool sendLmsCommand(int, int, const char* command) {
     return true;
 }
 void ResumeSqueezeBox(unsigned);
+static void note_squeezebox_device_close() {}
 #include "production_own_poll.inc"
 int main(int argc, char** argv) {
     assert(argc == 2);

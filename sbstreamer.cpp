@@ -50,6 +50,7 @@ struct StreamRequest {
     std::shared_ptr<SBEncoder> encoder;
     bool opened = false;
     bool pauseEnded = false;
+    std::chrono::steady_clock::time_point expectedCloseAt{};
     std::atomic<bool> heldResume{false};
     std::atomic<bool> resumeAcknowledged{false};
     std::atomic<bool> serving{false};
@@ -68,6 +69,7 @@ static void activateRequest(const std::shared_ptr<StreamRequest>& request, bool 
     sonos_position_connection(request->stream, request->id);
     activeRequest = request;
     g_enc = request->encoder;
+    if (promoted) request->expectedCloseAt = std::chrono::steady_clock::now();
     if (promoted)
         printf("stream %u: GET #%llu promoted\n", request->stream, request->id);
     printf("stream %u: GET #%llu ACTIVE\n", request->stream, request->id);
@@ -86,6 +88,7 @@ static void endSqueezeboxResponse(bool flush)
 {
     std::lock_guard<std::mutex> lock(g_enc_mutex);
     endedByPause = get_squeezebox_stream_id();
+    if (activeRequest) activeRequest->expectedCloseAt = std::chrono::steady_clock::now();
     const bool preserve = flush && activeRequest && activeRequest->heldResume
         && !activeRequest->serving;
     if (preserve) activeRequest->resumeAcknowledged = false;
@@ -95,6 +98,12 @@ static void endSqueezeboxResponse(bool flush)
     for (auto& request : standbyRequests)
         request->pauseEnded = true;
     standbyRequests.clear();
+}
+
+extern "C" void note_squeezebox_device_close(void)
+{
+    std::lock_guard<std::mutex> lock(g_enc_mutex);
+    if (activeRequest) activeRequest->expectedCloseAt = std::chrono::steady_clock::now();
 }
 
 extern "C" {
@@ -366,7 +375,17 @@ void SBStreamer::streamSqueezeBox(upnp::StreamRequest* handle, int stream)
             sendFailed = true;
             const double seconds = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - responseStarted).count();
-            printf("stream %d: send to Sonos failed after %.1f s (%s; errno=%d; "
+            bool expected = false;
+            {
+                std::lock_guard<std::mutex> lock(g_enc_mutex);
+                expected = (error == EPIPE || error == ECONNRESET)
+                    && request->expectedCloseAt != std::chrono::steady_clock::time_point{}
+                    && std::chrono::steady_clock::now() - request->expectedCloseAt < std::chrono::seconds(2);
+            }
+            if (expected)
+                printf("stream %d: client closed after %.1f s (%zu bytes confirmed sent; %s; errno=%d)\n",
+                    stream, seconds, sent, strerror(error), error);
+            else printf("stream %d: send to Sonos failed after %.1f s (%s; errno=%d; "
                    "%zu bytes confirmed sent, partial failed write uncounted)\n",
                 stream, seconds, error ? strerror(error) : "short write or closed socket",
                 error, sent);

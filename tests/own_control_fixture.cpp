@@ -20,8 +20,14 @@ int main(int argc, char** argv) {
     for (unsigned i = 0; i < 1000; ++i) assert(control.transportInfo().state == "PLAYING");
     assert(std::chrono::steady_clock::now() - begin < std::chrono::milliseconds(100));
     slow.join();
+    begin = std::chrono::steady_clock::now();
     assert(control.playStream("http://bridge:1400/music/squeezebox.flac?session=0123456789abcdef&stream=7",
         "A & B <Live> \"Mix\" '26", "http://lms:9000/art?a=1&b=2"));
+    assert(std::chrono::steady_clock::now() - begin >= std::chrono::seconds(6));
+    assert(control.transportInfo().title == "A & B <Live> \"Mix\" '26");
+    std::cout << "PASS: own Play accepts a six-second acknowledgement without timeout\n";
+    for (const auto action : {"Play", "Pause", "Stop", "SetAVTransportURI"}) assert(upnp::OwnSpeakerControl::actionTimeoutMs(action) == 20000);
+    for (const auto action : {"GetTransportInfo", "GetPositionInfo", "GetMediaInfo", "GetVolume", "GetZoneGroupState"}) assert(upnp::OwnSpeakerControl::actionTimeoutMs(action) == 5000);
     uint32_t ms = 0;
     assert(control.positionInfo(ms) && ms == 123000);
     assert(control.positionInfo(ms) && ms == 123000);
@@ -42,5 +48,10 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::seconds(5));
     control.poll();
     assert(control.speaker().coordinator == "Sonos Port" && control.speaker().ip == "127.0.0.1");
+    control.poll(); // a rapid second poll must reuse position and volume caches
+    assert(control.transportInfo().title == "Title from speaker");
+    assert(control.transportInfo().duration == "0:04:56");
+    for (unsigned i = 0; i < 1000; ++i) assert(control.displayVolume() == 37);
+    std::cout << "PASS: own title fallback, TrackMetaData title, duration and cached volume populated\n";
     std::cout << "PASS: own discovery, SOAP commands, CurrentURI, cached reads, faults, HTTP framing/deadline and group change\n";
 }

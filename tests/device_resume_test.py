@@ -22,6 +22,7 @@ def production_function(signature):
 # supplies only external state, network calls, and status/HTTP observations.
 bodies = "\n\n".join(production_function(signature) for signature in (
     "std::string SqueezeBoxURL(unsigned stream_id)",
+    "static bool alreadyPlayingCurrentStream(unsigned stream)\n",
     "static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition)\n",
     'extern "C" void new_squeezebox_stream_id(',
     "static void dispatchDeferredStop(",

@@ -20,6 +20,7 @@
 #include <thread>
 #include <vector>
 
+extern "C" void note_squeezebox_device_close(void);
 using namespace SONOS;
 using bridge::SBStreamer;
 static std::atomic<unsigned> generation(1), resumeCommands(0), sameURLRequests(0);
@@ -82,6 +83,14 @@ public:
         memcpy(buf, input.data() + offset, n); offset += n; return n;
     }
     bool SendData(const char* data, size_t n) override {
+        if (closeReason) {
+            if (closeReason == 1) end_squeezebox_response();
+            else note_squeezebox_device_close();
+            if (closeReason == 3) std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+            closeReason = 0;
+            errno = closeError;
+            return false;
+        }
         if (failureFd >= 0) return ::send(failureFd, data, n, MSG_NOSIGNAL) == static_cast<ssize_t>(n);
         if (drop || clientClosed.load() || sendError.load()) { errno = ECONNRESET; return false; }
         wire.append(data, n);
@@ -110,6 +119,7 @@ public:
     bool IsValid() const override { return !disconnected.load() && !clientClosed.load(); }
     void Disconnect() override { disconnected = true; }
     int failureFd = -1;
+    int closeReason = 0, closeError = ECONNRESET;
     std::atomic<bool> clientClosed{false}, sendError{false};
     std::atomic<unsigned> audioPackets{0};
     std::atomic<bool> headersSent{false}, audioSeen{false}, eof{false}, disconnected{false};
@@ -374,6 +384,32 @@ static void sessionTest() {
 }
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]).find("close-") == 0) {
+        const std::string mode = argv[1];
+        SBStreamer broker;
+        Socket broken(1);
+        broken.closeReason = mode == "close-pause" ? 1 : mode == "close-old" ? 3 : 2;
+        broken.closeError = mode == "close-unexpected" ? EIO : EPIPE;
+        serve(broker, broken);
+        assert(broken.disconnected);
+        return 0;
+    }
+    if (argc > 1 && std::string(argv[1]) == "promotion-close") {
+        SBStreamer broker;
+        Socket active(1, false, true), standby(1, false, true);
+        auto first = std::async(std::launch::async, [&] { serve(broker, active); });
+        waitUntil([&] { return active.headersSent.load(); });
+        auto second = std::async(std::launch::async, [&] { serve(broker, standby); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        active.clientClosed = true;
+        ready(first);
+        waitUntil([&] { return standby.headersSent.load(); });
+        standby.sendError = true;
+        feed(540);
+        ready(second);
+        assert(standby.disconnected);
+        return 0;
+    }
     if (argc > 1 && std::string(argv[1]) == "send-error-real") {
         int sockets[2];
         assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);

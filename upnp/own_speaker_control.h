@@ -17,6 +17,9 @@ public:
     bool pause() override;
     bool stop() override;
     TransportInfo transportInfo() override;
+    bool readTransportInfo(TransportInfo&) override;
+    uint8_t displayVolume() override;
+    static unsigned actionTimeoutMs(const std::string& action);
     bool positionInfo(uint32_t&, std::string* = nullptr) override;
     bool currentUri(std::string&) override;
     std::string controllerUri() override;
@@ -34,7 +37,9 @@ private:
     TransportInfo cachedTransport;
     std::string localAddress, room, positionText;
     uint32_t positionMs = 0;
-    Clock::time_point positionAt{}, topologyAt{};
+    Clock::time_point positionAt{}, topologyAt{}, volumeAt{};
+    uint8_t volume = 0;
+    std::string sentTitle;
     SoapResult call(const std::string& action, const SoapArguments& args,
                     const std::string& host = {}, const std::string& service = "AVTransport");
     bool topology(const std::string& host, bool initial);

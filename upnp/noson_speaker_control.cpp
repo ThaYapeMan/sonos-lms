@@ -82,6 +82,14 @@ TransportInfo NosonSpeakerControl::transportInfo() {
     }
     return info;
 }
+bool NosonSpeakerControl::readTransportInfo(TransportInfo& info) {
+    SONOS::ElementList vars;
+    if (!impl->player || !impl->player->GetTransportInfo(vars)) return false;
+    info.state = vars.GetValue("CurrentTransportState");
+    info.status = vars.GetValue("CurrentTransportStatus");
+    info.available = !info.state.empty();
+    return info.available;
+}
 uint8_t NosonSpeakerControl::displayVolume() {
     uint8_t volume = 0;
     impl->player->GetVolume(impl->speaker.uuid, &volume);

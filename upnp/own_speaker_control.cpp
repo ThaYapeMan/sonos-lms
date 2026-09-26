@@ -13,14 +13,22 @@ std::string OwnSpeakerControl::controllerUri() {
     auto port = streamPort();
     return localAddress.empty() || !port ? "" : "http://" + localAddress + ":" + std::to_string(port);
 }
+unsigned OwnSpeakerControl::actionTimeoutMs(const std::string& action) {
+    return action == "Play" || action == "SetAVTransportURI" || action == "Stop" || action == "Pause"
+        ? 20000 : 5000;
+}
+uint8_t OwnSpeakerControl::displayVolume() {
+    std::lock_guard<std::mutex> lock(cacheMutex); return volume;
+}
 SoapResult OwnSpeakerControl::call(const std::string& action, const SoapArguments& args,
                                   const std::string& host, const std::string& service) {
     const std::string address = host.empty() ? speaker().ip : host;
-    const auto path = service == "ZoneGroupTopology" ? "/ZoneGroupTopology/Control" : "/MediaRenderer/AVTransport/Control";
+    const auto path = service == "ZoneGroupTopology" ? "/ZoneGroupTopology/Control" :
+        service == "RenderingControl" ? "/MediaRenderer/RenderingControl/Control" : "/MediaRenderer/AVTransport/Control";
     auto http = httpPost({address, path, speakerPort}, {
         {"Content-Type", "text/xml"},
         {"SOAPACTION", "\"urn:schemas-upnp-org:service:" + service + ":1#" + action + "\""}
-    }, soapBody(service, action, args));
+    }, soapBody(service, action, args), actionTimeoutMs(action));
     // Only a connection to the selected speaker determines its callback address.
     if (!http.localAddress.empty() && (host.empty() || speaker().ip.empty())) {
         std::lock_guard<std::mutex> lock(cacheMutex); localAddress = http.localAddress;
@@ -91,7 +99,9 @@ std::vector<std::string> OwnSpeakerControl::discoverRooms(const std::string& see
     return rooms;
 }
 std::vector<Speaker> OwnSpeakerControl::discoverRoomDetails(const std::string& seed) {
-    auto locations = seed.empty() ? discoverSsdp() : std::vector<HttpUrl>{{seed, "/", speakerPort}};
+    std::vector<HttpUrl> locations;
+    if (seed.empty()) locations = discoverSsdp();
+    else locations.push_back({seed, "/", speakerPort});
     for (const auto& location : locations) {
         auto result = call("GetZoneGroupState", {}, location.host, "ZoneGroupTopology");
         if (!result.ok) continue;
@@ -108,6 +118,7 @@ bool OwnSpeakerControl::playStream(const std::string& url, const std::string& ti
     XmlNode item;
     if (!parseXml(metadata, item) || !item.child("item")) return false;
     const auto uri = item.child("item")->value("res");
+    { std::lock_guard<std::mutex> lock(cacheMutex); sentTitle = title; cachedTransport.title = title; }
     return call("SetAVTransportURI", {{"InstanceID", "0"}, {"CurrentURI", uri}, {"CurrentURIMetaData", metadata}}).ok && play();
 }
 bool OwnSpeakerControl::play() { return call("Play", {{"InstanceID", "0"}, {"Speed", "1"}}).ok; }
@@ -129,20 +140,44 @@ bool OwnSpeakerControl::positionInfo(uint32_t& ms, std::string* text) {
         if (sscanf(time.c_str(), "%llu:%llu:%llu%c", &h, &m, &s, &tail) != 3 || m >= 60 || s >= 60
             || h > std::numeric_limits<uint32_t>::max() / 3600000u
             || (h * 3600 + m * 60 + s) * 1000 > std::numeric_limits<uint32_t>::max()) return false;
+        {
+            std::lock_guard<std::mutex> lock(cacheMutex);
+            cachedTransport.duration = result.response.value("TrackDuration");
+            XmlNode metadata;
+            const auto xml = result.response.value("TrackMetaData");
+            const auto valid = parseXml(xml, metadata);
+            const auto item = valid ? metadata.child("item") : nullptr;
+            cachedTransport.title = item && !item->value("title").empty() ? item->value("title") : sentTitle;
+        }
         positionMs = (h * 3600 + m * 60 + s) * 1000; positionText = time;
         positionAt = Clock::now() + std::chrono::seconds(1);
     }
     ms = positionMs; if (text) *text = positionText; return true;
 }
-void OwnSpeakerControl::poll() {
+bool OwnSpeakerControl::readTransportInfo(TransportInfo& info) {
     auto result = call("GetTransportInfo", {{"InstanceID", "0"}});
-    TransportInfo info;
-    if (result.ok && result.response.child("CurrentTransportState") && result.response.child("CurrentTransportStatus")) {
-        info.available = true; info.state = result.response.value("CurrentTransportState");
-        info.status = result.response.value("CurrentTransportStatus");
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    cachedTransport.available = result.ok && result.response.child("CurrentTransportState") && result.response.child("CurrentTransportStatus");
+    if (cachedTransport.available) {
+        cachedTransport.state = result.response.value("CurrentTransportState");
+        cachedTransport.status = result.response.value("CurrentTransportStatus");
     }
-    {
-        std::lock_guard<std::mutex> lock(cacheMutex); cachedTransport = info;
+    info = cachedTransport;
+    return info.available;
+}
+void OwnSpeakerControl::poll() {
+    TransportInfo info;
+    readTransportInfo(info);
+    uint32_t ms;
+    positionInfo(ms);
+    if (Clock::now() >= volumeAt) {
+        volumeAt = Clock::now() + std::chrono::seconds(1);
+        auto result = call("GetVolume", {{"InstanceID", "0"}, {"Channel", "Master"}}, "", "RenderingControl");
+        const auto value = result.response.value("CurrentVolume");
+        unsigned parsed; char tail;
+        if (result.ok && sscanf(value.c_str(), "%u%c", &parsed, &tail) == 1 && parsed <= 100) {
+            std::lock_guard<std::mutex> lock(cacheMutex); volume = parsed;
+        }
     }
     if (Clock::now() >= topologyAt) {
         topologyAt = Clock::now() + std::chrono::seconds(5);

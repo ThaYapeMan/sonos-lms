@@ -56,17 +56,21 @@ class Speaker(BaseHTTPRequestHandler):
         count = self.server.counts[action]
         self.server.requests.append((action, body))
         node = ET.fromstring(body).find(f'{{{SOAP}}}Body')[0]
-        service = 'ZoneGroupTopology' if action == 'GetZoneGroupState' else 'AVTransport'
+        service = 'ZoneGroupTopology' if action == 'GetZoneGroupState' else 'RenderingControl' if action == 'GetVolume' else 'AVTransport'
         assert node.tag == f'{{urn:schemas-upnp-org:service:{service}:1}}{action}'
         assert self.path == ('/ZoneGroupTopology/Control' if service == 'ZoneGroupTopology'
-                             else '/MediaRenderer/AVTransport/Control')
+                             else '/MediaRenderer/RenderingControl/Control' if service == 'RenderingControl' else '/MediaRenderer/AVTransport/Control')
         if service == 'AVTransport':
             assert node.findtext('InstanceID') == '0'
             if action in self.server.golden:
                 assert body == self.server.golden[action], action
-        if action == 'SetAVTransportURI':
+        if action == 'SetAVTransportURI' and self.server.mode in ('control', 'golden'):
             assert body == (ROOT / 'tests/fixtures/noson-set-uri.xml').read_bytes()
-        if action == 'Play': assert node.findtext('Speed') == '1'
+        if action == 'Play':
+            assert node.findtext('Speed') == '1'
+            if self.server.mode in ('control', 'delayed-play') and count == 1: time.sleep(6)
+            if self.server.mode == 'timeout-playing': time.sleep(21)
+        if action == 'SetAVTransportURI': self.server.current_uri = node.findtext('CurrentURI')
         values = ''
         fault = self.server.mode == 'control' and (action == 'Pause' or action == 'Play' and count == 2)
         if fault:
@@ -86,8 +90,13 @@ class Speaker(BaseHTTPRequestHandler):
             if self.server.mode == 'poll':
                 state = {3: 'PAUSED_PLAYBACK', 4: 'TRANSITIONING'}.get(count, 'PLAYING')
             values = f'<CurrentTransportState>{state}</CurrentTransportState><CurrentTransportStatus>OK</CurrentTransportStatus>'
-        if action == 'GetPositionInfo': values = '<RelTime>0:02:03</RelTime>'
-        if action == 'GetMediaInfo': values = '<CurrentURI>http://external/?a=1&amp;b=2</CurrentURI><TrackURI>wrong</TrackURI>'
+        if action == 'GetPositionInfo': values = '<RelTime>0:02:03</RelTime><TrackDuration>0:04:56</TrackDuration><TrackMetaData>' + escape('<DIDL-Lite><item><dc:title xmlns:dc="urn:dc">Title from speaker</dc:title></item></DIDL-Lite>') + '</TrackMetaData>'
+        if action == 'GetVolume':
+            assert node.findtext('Channel') == 'Master'
+            values = '<CurrentVolume>37</CurrentVolume>'
+        if action == 'GetMediaInfo':
+            uri = self.server.current_uri if self.server.mode == 'timeout-playing' else 'http://external/?a=1&b=2'
+            values = '<CurrentURI>' + escape(uri) + '</CurrentURI><TrackURI>wrong</TrackURI>'
         self.send(f'<s:Envelope xmlns:s="{SOAP}"><s:Body><u:{action}Response '
                   f'xmlns:u="urn:schemas-upnp-org:service:{service}:1">{values}</u:{action}Response></s:Body></s:Envelope>')
 
@@ -98,7 +107,9 @@ def run(mode, command, golden=None):
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
     try:
-        subprocess.run([*command, str(server.server_port)], cwd=ROOT, check=True, timeout=30)
+        result = subprocess.run([*command, str(server.server_port)], cwd=ROOT, check=True, timeout=40, capture_output=True, text=True)
+        print(result.stdout, end='')
+        server.output = result.stdout
         assert not server.errors, server.errors
         return server
     finally:
@@ -111,8 +122,9 @@ reference = run('golden', [str(ROOT / 'noson-golden'), '--all'])
 golden = dict(reference.requests)
 assert set(golden) == {'SetAVTransportURI', 'Play', 'Pause', 'Stop', 'GetTransportInfo', 'GetPositionInfo', 'GetMediaInfo'}
 control = run('control', [str(ROOT / 'own-control-test')], golden)
-assert control.counts['GetPositionInfo'] == 1
-assert control.counts['GetTransportInfo'] == 2
+assert control.counts['GetPositionInfo'] == 3
+assert control.counts['GetVolume'] == 2
+assert control.counts['GetTransportInfo'] == 3
 assert control.counts['GetZoneGroupState'] == 3
 for action, body in control.requests:
     if action in golden: assert body == golden[action]
@@ -127,6 +139,28 @@ def production_function(signature):
         depth += (source[end] == '{') - (source[end] == '}')
         end += 1
     return source[start:end]
+
+with tempfile.TemporaryDirectory(prefix='sonos-play-timeout-') as temp:
+    temp = Path(temp)
+    (temp / 'production_play_timeout.inc').write_text('\n'.join(production_function(s) for s in (
+        'static bool alreadyPlayingCurrentStream(unsigned stream)\n',
+        'static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition)\n',
+        'static void dispatchStreamStart(')))
+    executable = temp / 'play-timeout-test'
+    subprocess.run(['g++', '-O2', '-Wall', '-Wextra', '-I', str(ROOT), '-I', str(temp),
+                    str(ROOT / 'tests/play_timeout_fixture.cpp'),
+                    *[str(ROOT / ('upnp/' + name + '.cpp')) for name in ('own_speaker_control', 'xml', 'soap', 'http', 'discovery')],
+                    '-lpthread', '-o', str(executable)], check=True)
+    for mode in ('delayed-play', 'timeout-playing'):
+        tested = run(mode, [str(executable)])
+        assert tested.counts['Play'] == tested.counts['SetAVTransportURI'] == 1
+        assert tested.output.count('PlaySqueezeBox: title=') == 1
+        if mode == 'timeout-playing':
+            assert 'UPnP Play failed: timeout (HTTP 0)' in tested.output
+            assert 'PlayStream(stream 7): device already playing current stream; no retry' in tested.output
+        else:
+            assert 'failed' not in tested.output
+        print(f'PASS: {mode}: one PlaySqueezeBox, one SetAVTransportURI, one Play; no track restart')
 
 with tempfile.TemporaryDirectory(prefix='sonos-own-poll-') as temp:
     temp = Path(temp)
