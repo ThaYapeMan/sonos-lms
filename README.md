@@ -144,12 +144,12 @@ sonos-lms installer — build abc1234
 LMS server: 192.0.2.23 (config)
 LMS server [192.0.2.23]:
 Sonos rooms found: 3
-Room        Model   IP          Group                          Bridge
+Room        Model   IP          Group                          Bridge to LMS
 MBR         One     192.0.2.24  -                              new
 Sonos Port  Port    192.0.2.25  member of Study                yes, running
 Study       Play:1  192.0.2.26  coordinator: Study+Sonos Port  yes, running
-Activate Sonos room "MBR"? [y/N] y
-Change other rooms? [y/N]
+Bridge Sonos room "MBR" to LMS? [y/N] y
+Change other rooms bridged to LMS? [y/N]
 Config:
 --- current config
 +++ proposed config
@@ -170,7 +170,7 @@ Logs: journalctl -u 'sonos-lms@*' -f
 With the same build and settings, the plan instead includes:
 
 ```text
-Change which rooms are bridged? [y/N]
+Change which rooms are bridged to LMS? [y/N]
 Config:  no changes
 Keep:    Sonos Port, Study, MBR
 Nothing to do.

@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import termios
 import unicodedata
 
 ROOM_HEADER = ('# Sonos rooms found on the network.\n'
@@ -141,6 +142,21 @@ def atomic_write(path, text, mode=0o644):
             os.unlink(name)
 
 
+def flush_pending_input(input_stream):
+    if input_stream.isatty():
+        try:
+            termios.tcflush(input_stream.fileno(), termios.TCIFLUSH)
+        except (OSError, ValueError, termios.error):
+            pass
+
+
+def quoted_input(value):
+    # Keep ordinary text readable, but never emit terminal control characters.
+    return '"' + ''.join('\\\\' if c == '\\' else '\\"' if c == '"'
+                         else repr(c)[1:-1] if not c.isprintable() else c
+                         for c in value) + '"'
+
+
 def ask(prompt, input_stream, output):
     print(prompt, end='', file=output, flush=True)
     value = input_stream.readline()
@@ -151,12 +167,13 @@ def ask(prompt, input_stream, output):
 
 def ask_yes(prompt, default, input_stream, output):
     while True:
-        answer = ask(prompt, input_stream, output).lower()
+        original = ask(prompt, input_stream, output)
+        answer = original.lower()
         if not answer:
             return default
         if answer in ('y', 'yes', 'n', 'no'):
             return answer in ('y', 'yes')
-        print('Please answer y/yes/n/no, or press Enter.', file=output)
+        print(f'Rejected {quoted_input(original)}: please answer y, n or press Enter.', file=output)
 
 
 def lms_value(text):
@@ -203,7 +220,7 @@ def service_states(names, run):
 def room_table(found, configured, states, output):
     offline = sorted(set(configured) - set(found))
     print(f'Sonos rooms found: {len(found)}' + (f', offline: {len(offline)}' if offline else ''), file=output)
-    rows = [('Room', 'Model', 'IP', 'Group', 'Bridge')]
+    rows = [('Room', 'Model', 'IP', 'Group', 'Bridge to LMS')]
     for name in sorted(set(found) | set(configured)):
         model, ip, coordinator, members = found.get(name, ('-', '-', '-', []))
         group = '-'
@@ -330,13 +347,14 @@ def install(repo, config_dir, unit_dir, args, run=subprocess.run, output=sys.std
     print(f'LMS server: {shown or "-"} ({source})', file=output)
     try:
         if interactive:
+            flush_pending_input(input_stream)
             while True:
                 answer = ask(f'LMS server [{shown}]: ', input_stream, output)
                 if not answer: break
                 if valid_server(answer):
                     server = answer
                     break
-                print('Server must have no port, whitespace or control characters.', file=output)
+                print(f'Rejected {quoted_input(answer)}: LMS server must be a host or IP without port or spaces.', file=output)
         found = {}
         try:
             discovery = run(['./sonos-lms', '--list-rooms', '--details'], cwd=repo, capture_output=True, text=True)
@@ -362,7 +380,7 @@ def install(repo, config_dir, unit_dir, args, run=subprocess.run, output=sys.std
         answers = {}
         def select(names):
             for room in sorted(set(names) - explicit):
-                answers[room] = ask_yes(f'Activate Sonos room "{room}"? ' +
+                answers[room] = ask_yes(f'Bridge Sonos room "{room}" to LMS? ' +
                                         ('[Y/n] ' if rooms[room] else '[y/N] '),
                                         rooms[room], input_stream, output)
         if interactive:
@@ -370,9 +388,9 @@ def install(repo, config_dir, unit_dir, args, run=subprocess.run, output=sys.std
                 select(found)
             elif new:
                 select(new)
-                if ask_yes('Change other rooms? [y/N] ', False, input_stream, output):
+                if ask_yes('Change other rooms bridged to LMS? [y/N] ', False, input_stream, output):
                     select(set(found) - set(new))
-            elif ask_yes('Change which rooms are bridged? [y/N] ', False, input_stream, output):
+            elif ask_yes('Change which rooms are bridged to LMS? [y/N] ', False, input_stream, output):
                 select(found)
         merged, new = merge_config(original, found, enabled, server, answers)
         rooms = parse_rooms(merged, warn)

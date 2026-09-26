@@ -252,6 +252,34 @@ class InstallerTests(unittest.TestCase):
                           self.out, self.err, TTY(answers), lms_check=mock_lms)
         return runner
 
+    def test_flush_once_only_interactive_tty_and_ignore_errors(self):
+        with patch.object(installer, 'flush_pending_input') as flush:
+            self.interactive('bad host\n\n\n\n\n\n')
+            flush.assert_called_once()
+            flush.reset_mock()
+            self.run_install()
+            self.interactive('', args=('--yes',))
+            self.interactive('', args=('--non-interactive',))
+            flush.assert_not_called()
+        with patch.object(installer.termios, 'tcflush') as flush:
+            installer.flush_pending_input(io.StringIO())
+            flush.assert_not_called()
+            with tempfile.TemporaryFile(mode='w+') as stream:
+                with patch.object(stream, 'isatty', return_value=True):
+                    installer.flush_pending_input(stream)
+                    flush.assert_called_once_with(stream.fileno(), installer.termios.TCIFLUSH)
+                    for error in (OSError(), ValueError(), installer.termios.error()):
+                        flush.side_effect = error
+                        installer.flush_pending_input(stream)
+
+    def test_rejected_input_preserves_case_and_escapes_controls(self):
+        out = io.StringIO()
+        self.assertTrue(installer.ask_yes('Answer? ', False,
+                        io.StringIO('Maybe\x01\t\nY\n'), out))
+        self.assertIn('Rejected "Maybe\\x01\\t": please answer y, n or press Enter.', out.getvalue())
+        self.assertNotIn('\x01', out.getvalue())
+        self.assertEqual(installer.quoted_input('a"b\\c'), '"a\\"b\\\\c"')
+
     def test_lms_found_empty_existing_and_override(self):
         for host in ('lms.example', ''):
             self.config.unlink(missing_ok=True)
@@ -271,9 +299,10 @@ class InstallerTests(unittest.TestCase):
         self.interactive('bad:9000\nbad host\nbad\x01host\nnew.example\nmaybe\ny\nn\ny\n\n\n')
         self.assertEqual(self.config.read_text(), '# keep\nLMS_SERVER=new.example\nroom.Study=yes\nroom.Offline= true \nOTHER=unchanged\nroom.Kitchen=yes\nroom.Sonos Port=no\n')
         self.assertRegex(self.out.getvalue(), r'Offline +.*offline, yes')
-        self.assertIn('"Study"? [Y/n]', self.out.getvalue())
+        self.assertIn('"Study" to LMS? [Y/n]', self.out.getvalue())
         self.assertEqual(self.out.getvalue().count('LMS server [old]:'), 4)
-        self.assertEqual(self.out.getvalue().count('"Kitchen"? [y/N]'), 2)
+        self.assertIn('Rejected "bad\\x01host": LMS server must be a host or IP without port or spaces.', self.out.getvalue())
+        self.assertEqual(self.out.getvalue().count('"Kitchen" to LMS? [y/N]'), 2)
 
     def test_cancel_interrupt_and_eof_leave_everything_untouched(self):
         original = 'LMS_SERVER=old\nroom.Study=ON\n'
@@ -302,7 +331,7 @@ class InstallerTests(unittest.TestCase):
         self.run_install(args=('--reconfigure',))  # non-TTY still never asks
         self.assertIn('room.Study=no', self.config.read_text())
         self.interactive('\n\n\n\n', args=('Study', '--reconfigure'))
-        self.assertNotIn('"Study"?', self.out.getvalue())
+        self.assertNotIn('"Study" to LMS?', self.out.getvalue())
         self.assertIn('room.Study=yes', self.config.read_text())
 
     def test_details_table_groups_unknown_new_and_offline(self):
@@ -320,6 +349,12 @@ class InstallerTests(unittest.TestCase):
         self.assertRegex(text, r'Kitchen +- +- +- +new')
         self.assertRegex(text, r'Offline +.*offline, no')
         self.assertIn('yes, stopped', text)
+        header = next(line for line in text.splitlines() if line.startswith('Room '))
+        self.assertTrue(header.endswith('Bridge to LMS'))
+        for name, value in [('Kitchen', 'new'), ('Study', 'yes, running'),
+                            ('Sonos Port', 'yes, stopped'), ('Offline', 'offline, no')]:
+            row = next(line for line in text.splitlines() if line.startswith(name + ' '))
+            self.assertEqual(row.index(value), header.index('Bridge to LMS'))
         self.assertEqual(len(warnings), 1)
 
     def test_plan_build_server_force_stop_and_nothing(self):
@@ -389,19 +424,19 @@ class InstallerTests(unittest.TestCase):
         runner.calls.clear()
         self.interactive('\n\n', runner)
         text = self.out.getvalue()
-        self.assertIn('Change which rooms are bridged? [y/N]', text)
-        self.assertNotIn('Activate Sonos room', text)
+        self.assertIn('Change which rooms are bridged to LMS? [y/N]', text)
+        self.assertNotIn('Bridge Sonos room', text)
         self.assertNotIn('Apply?', text)
         self.assertFalse(runner.actions())
         runner.rooms += 'Kitchen\n'
         self.interactive('\ny\n\n\n', runner)
         text = self.out.getvalue()
-        self.assertIn('"Kitchen"? [y/N]', text)
-        self.assertIn('Change other rooms? [y/N]', text)
-        self.assertNotIn('"Study"?', text)
+        self.assertIn('"Kitchen" to LMS? [y/N]', text)
+        self.assertIn('Change other rooms bridged to LMS? [y/N]', text)
+        self.assertNotIn('"Study" to LMS?', text)
         self.assertNotIn('New rooms', text)
         self.interactive('\n\n\n\n', runner, ('--reconfigure',))
-        self.assertEqual(self.out.getvalue().count('Activate Sonos room'), 3)
+        self.assertEqual(self.out.getvalue().count('Bridge Sonos room'), 3)
         self.assertNotIn('Change which', self.out.getvalue())
 
     def test_lms_sources_and_mismatch(self):
@@ -452,22 +487,26 @@ class InstallerTests(unittest.TestCase):
         for case in ('first', 'same', 'new', 'yes'):
             base = Path(self.temp.name) / case
             master, slave = pty.openpty()
+            if case == 'first': os.write(master, b'pasted-follow-up-command\n')
             process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
                                         '--pty-child', str(base), case],
                                        stdin=slave, stdout=slave, stderr=slave)
             os.close(slave)
             transcript = b''
+            answered_through = 0
             prompts = [(b'LMS server [lms.example]: ', b'\n')]
             if case == 'first':
-                prompts += [(b'Activate Sonos room "Kitchen"? [y/N] ', b'n\n'),
-                            (b'Activate Sonos room "Sonos Port"? [y/N] ', b'y\n'),
-                            (b'Activate Sonos room "Study"? [y/N] ', b'y\n'),
+                prompts = [(b'LMS server [lms.example]: ', b'sudo make install\n'),
+                           (b'LMS server [lms.example]: ', b'\n')]
+                prompts += [(b'Bridge Sonos room "Kitchen" to LMS? [y/N] ', b'n\n'),
+                            (b'Bridge Sonos room "Sonos Port" to LMS? [y/N] ', b'y\n'),
+                            (b'Bridge Sonos room "Study" to LMS? [y/N] ', b'y\n'),
                             (b'Apply? [Y/n] ', b'\n')]
             elif case == 'same':
-                prompts += [(b'Change which rooms are bridged? [y/N] ', b'\n')]
+                prompts += [(b'Change which rooms are bridged to LMS? [y/N] ', b'\n')]
             elif case == 'new':
-                prompts += [(b'Activate Sonos room "MBR"? [y/N] ', b'y\n'),
-                            (b'Change other rooms? [y/N] ', b'\n'),
+                prompts += [(b'Bridge Sonos room "MBR" to LMS? [y/N] ', b'y\n'),
+                            (b'Change other rooms bridged to LMS? [y/N] ', b'\n'),
                             (b'Apply? [Y/n] ', b'\n')]
             else: prompts = []
             deadline = time.monotonic() + 10
@@ -478,8 +517,10 @@ class InstallerTests(unittest.TestCase):
                         except OSError: break
                         if not chunk: break
                         transcript += chunk
-                        if prompts and prompts[0][0] in transcript:
-                            os.write(master, prompts.pop(0)[1])
+                        if prompts and prompts[0][0] in transcript[answered_through:]:
+                            prompt, answer = prompts.pop(0)
+                            answered_through = transcript.index(prompt, answered_through) + len(prompt)
+                            os.write(master, answer)
                     elif process.poll() is not None: break
                 self.assertEqual(process.wait(timeout=1), 0, transcript.decode())
                 self.assertFalse(prompts)
@@ -490,8 +531,11 @@ class InstallerTests(unittest.TestCase):
             Path('/tmp/sonos-plan-' + case + '.txt').write_text(text)
             self.assertIn(installer.LMS_COMMENT + 'LMS_SERVER=lms.example', text)
             self.assertIn('room.Sonos Port=yes', text)
+            if case == 'first':
+                self.assertIn('Rejected "sudo make install": LMS server must be a host or IP without port or spaces.', text)
+                self.assertNotIn('Rejected "pasted-follow-up-command"', text)
             if case == 'same':
-                self.assertNotIn('Activate Sonos room', text)
+                self.assertNotIn('Bridge Sonos room', text)
                 self.assertNotIn('Apply?', text)
                 self.assertNotIn('Restart:', text)
                 self.assertIn('Keep:    Sonos Port, Study', text)
