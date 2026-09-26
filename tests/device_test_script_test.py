@@ -200,9 +200,9 @@ for advance in (True, False):
         message = auto.progress('speaker', 'lms', 9090, 'player', clock=clock.clock, sleep=clock.sleep,
                                 read_soap=read_soap, read_lms=read_lms)
     except RuntimeError as error:
-        assert not advance and 'did not advance' in str(error)
+        assert not advance and 'did not start increasing' in str(error)
     else: assert advance and 'audio continues' in message
-    assert clock.now <= 6
+    assert clock.now <= 16
 print('PASS: device-test AUTO requires both clocks advance 3 s within 6 s, rejects stalled speaker')
 
 with tempfile.TemporaryDirectory(prefix='sonos-uri-fixture-') as directory:
@@ -229,8 +229,14 @@ COORDINATOR_IP=192.0.2.10
 UNIT=fixture
 AUTO_SINCE=now
 AUTO_STATUS_FILE="$OUT/status"
-: > "$AUTO_STATUS_FILE"
-python3() { [[ $STATUS == OK ]] || { printf '%s' "$STATUS"; return 1; }; }
+printf '{"timestamp":1,"state":"PLAYING","status":"%s"}\n' "$STATUS" > "$AUTO_STATUS_FILE"
+python3() {
+    if [[ $2 == sample ]]; then
+        printf '{"timestamp":2,"state":"PLAYING","status":"%s"}\n' "$STATUS"
+    else
+        command python3 "$REAL_HELPER" "${@:2}"
+    fi
+}
 journalctl() { printf '%s' "$JOURNAL"; }
 sleep 60 & AUTO_MONITOR_PID=$!
 auto_end 7
@@ -238,7 +244,7 @@ auto_summary
 exit "$AUTO_FAILED"
 '''
         result = subprocess.run(['bash', '-c', prefix + body], capture_output=True, text=True,
-                                env={**env, 'STATUS': status, 'JOURNAL': journal})
+                                env={**env, 'STATUS': status, 'JOURNAL': journal, 'REAL_HELPER': str(ROOT / 'scripts/device_test_auto.py')})
         assert result.returncode == expected, result
         if expected: assert (status if status != 'OK' else journal) in result.stdout
 print('PASS: device-test AUTO completion rejects non-OK transport text and scenario journal ERROR_*')
@@ -303,3 +309,148 @@ exit "$AUTO_FAILED"
                                      'NEW_STREAM': stream, 'NEW_TITLE': title})
         assert result.returncode == expected, (result.stdout, result.stderr)
 print('PASS: device-test AUTO S5 requires a new speaker stream and LMS track B title')
+
+# A fake systemd version returns stale records only when -n/--grep are used.
+with tempfile.TemporaryDirectory(prefix='sonos-journal-reader-') as directory:
+    base = Path(directory)
+    journalctl = base / 'journalctl'
+    journalctl.write_text(r'''#!/bin/bash
+printf '%s\n' "$*" >> "$CALLS"
+case "$*" in
+    *--grep*|*' -n '*|*'-5min'*)
+        printf "Stream session: old\nCreating new stream (1) for Sonos\nPlaySqueezeBox: title='Old title' art=''\nspeaker URI: stream=1 session=old\n" ;;
+    *)
+        printf "noise\nCreating new stream (2) for Sonos\nspeaker URI: stream=2 session=old\nStream session: fresh\nCreating new stream (5) for Sonos\nPlaySqueezeBox: title='Current title' art=''\nspeaker URI: stream=5 session=fresh\n" ;;
+esac
+''')
+    journalctl.chmod(0o755)
+    calls = base / 'calls'
+    env = {**os.environ, 'OUT': directory, 'AUTO': '1', 'UNIT': 'sonos-lms@Study.service',
+           'PATH': directory + os.pathsep + os.environ['PATH'], 'CALLS': str(calls)}
+    stale = subprocess.run(['journalctl', '-u', env['UNIT'], '-n', '600', '--grep=Creating'],
+                           env=env, capture_output=True, text=True, check=True)
+    assert 'stream (1)' in stale.stdout and 'stream (5)' not in stale.stdout
+    calls.write_text('')
+    body = r'''
+START_EPOCH=1700000000; JOURNAL_SINCE="@$START_EPOCH"
+mark() { printf '%s\n' "$*"; }
+journal_tail
+printf 'bridge=%s speaker=%s\n' "$(bridge_stream)" "$(speaker_stream)"
+journal_self_check
+JOURNAL_SINCE="-5min" journal_tail
+'''
+    result = subprocess.run(['bash', '-c', prefix+body], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert 'bridge=5 speaker=5' in result.stdout and 'self-check OK' in result.stdout
+    assert 'Stream session: fresh' in result.stdout and 'Stream session: old' in result.stdout
+    recorded = calls.read_text().splitlines()
+    assert all('--grep' not in line and ' -n ' not in line for line in recorded), recorded
+    assert all('--since @1700000000' in line or '--since -5min' in line for line in recorded), recorded
+    result = subprocess.run(['bash', '-c', prefix + r'''
+s=1
+journal_tail() { echo 'Creating new stream (1) for Sonos'; }
+journal_self_check
+echo SHOULD_NOT_CONTINUE
+'''], env=env, capture_output=True, text=True)
+    assert result.returncode == 1 and 'SHOULD_NOT_CONTINUE' not in result.stdout
+    assert 'Journal reader self-check failed' in result.stderr and 'stream (5)' in result.stderr
+    assert 'JOURNAL_SINCE="-5min" snapshot' in script
+print('PASS: AUTO journal reader uses run epoch/local grep, startup -5min, session resets and aborts on stale reader')
+
+# The speaker restarts at zero; LMS does not start until four seconds later.
+for stalled in (False, True):
+    clock = Clock()
+    def speaker(*args, **kwargs):
+        return {'RelTime': f'0:00:{0 if stalled else clock.now}'}
+    def late_lms(*args, **kwargs):
+        return {'time': str(23.5498 + max(0, clock.now - 4))}
+    try:
+        message = auto.progress('speaker', 'lms', 9090, 'player', clock=clock.clock,
+                                sleep=clock.sleep, read_soap=speaker, read_lms=late_lms)
+    except RuntimeError as error:
+        assert stalled and clock.now == 10, (clock.now, error)
+        message = str(error)
+    else:
+        assert not stalled and 7 <= clock.now <= 10
+    assert 'speaker' in message and 'LMS' in message and '23.5498' in message
+    print(message)
+print('PASS: AUTO progress tolerates late LMS start, rejects stalled speaker after 10 s, reports measured values')
+
+# Transient startup read failures consume the startup budget, not the measurement window.
+clock = Clock()
+def delayed_read(*args, **kwargs):
+    if clock.now < 2: raise TimeoutError('held GET')
+    return {'RelTime': f'0:00:{clock.now}'}
+message = auto.progress('speaker', 'lms', 9090, 'player', clock=clock.clock, sleep=clock.sleep,
+                        read_soap=delayed_read, read_lms=lambda *a, **k: {'time': str(clock.now)})
+assert 'audio continues' in message and clock.now <= 16
+# Both start, then the speaker stalls during the measurement window.
+clock = Clock()
+try:
+    auto.progress('speaker', 'lms', 9090, 'player', clock=clock.clock, sleep=clock.sleep,
+                  read_soap=lambda *a, **k: {'RelTime': f'0:00:{min(clock.now, .5)}'},
+                  read_lms=lambda *a, **k: {'time': str(clock.now)})
+except RuntimeError as error:
+    assert 'did not advance 3 s within 6 s' in str(error) and clock.now <= 16
+else: raise AssertionError('stalled measurement accepted')
+print('PASS: AUTO progress retries startup reads and still enforces the following six-second advance window')
+
+import json
+samples = io.StringIO()
+with patch.object(sys, 'argv', ['auto', 'monitor', '--host', 'fixture']), \
+     patch.object(auto, 'soap', side_effect=[
+         {'CurrentTransportState': 'PLAYING', 'CurrentTransportStatus': 'OK'},
+         {'CurrentTransportState': 'STOPPED', 'CurrentTransportStatus': 'ERROR_NO_PLAYABLE_CONTENT'},
+         OSError('no reply')]), \
+     patch.object(auto.time, 'sleep', side_effect=[None, None, KeyboardInterrupt]), redirect_stdout(samples):
+    try: auto.main()
+    except KeyboardInterrupt: pass
+records = [json.loads(line) for line in samples.getvalue().splitlines()]
+assert len(records) == 3 and all('timestamp' in record for record in records)
+assert records[0]['status'] == 'OK' and records[0]['state'] == 'PLAYING'
+assert records[2]['error'] == 'no reply'
+assert '1 GetTransportInfo samples: status OK' == auto.check_status_log(json.dumps(records[0]))
+for contents, diagnostic in [('', 'cannot check'), (samples.getvalue(), 'ERROR_NO_PLAYABLE_CONTENT'),
+                              ('not json', 'invalid record')]:
+    try: auto.check_status_log(contents)
+    except RuntimeError as error: assert diagnostic in str(error)
+    else: raise AssertionError('missing or bad samples passed')
+print('PASS: AUTO monitor records timestamped OK/state/error samples; empty and malformed logs cannot pass')
+
+with tempfile.TemporaryDirectory(prefix='sonos-empty-status-') as directory:
+    result = subprocess.run(['bash', '-c', prefix + r'''
+COORDINATOR_IP=fixture; UNIT=fixture; AUTO_SINCE=now
+AUTO_STATUS_FILE="$OUT/status"; : > "$AUTO_STATUS_FILE"
+python3() {
+    if [[ $2 == sample ]]; then printf '{"timestamp":1,"state":"PLAYING","status":"OK"}\n';
+    else command python3 "$REAL_HELPER" "${@:2}"; fi
+}
+journalctl() { :; }; mark() { :; }
+sleep 60 & AUTO_MONITOR_PID=$!
+auto_end 1
+auto_summary
+exit "$AUTO_FAILED"
+'''], env={**os.environ, 'AUTO': '1', 'OUT': directory,
+           'REAL_HELPER': str(ROOT / 'scripts/device_test_auto.py')}, capture_output=True, text=True)
+    assert result.returncode == 1, result
+    assert 'cannot check: empty GetTransportInfo sample log' in result.stdout
+print('PASS: AUTO empty monitor log fails scenario even when final synchronous sample is OK')
+
+with tempfile.TemporaryDirectory(prefix='sonos-discovery-backend-') as directory:
+    for fallback in ('0', '1'):
+        calls = Path(directory) / 'calls'; calls.write_text('')
+        result = subprocess.run(['bash', '-c', prefix + r'''
+ROOM=Study
+./sonos-lms() {
+    printf '%s %s\n' "$SONOS_LMS_UPNP" "$*" >> "$CALLS"
+    [[ $FALLBACK != 1 || $SONOS_LMS_UPNP != yeney ]] || return 2
+    printf 'Study\tPlay:1\t192.0.2.10\tStudy\tStudy\n'
+}
+python3() { command python3 "$REAL_HELPER" "${@:2}"; }
+discover_coordinator
+'''], env={**os.environ, 'OUT': directory, 'FALLBACK': fallback, 'CALLS': str(calls),
+           'REAL_HELPER': str(ROOT / 'scripts/device_test_auto.py')}, capture_output=True, text=True)
+        assert result.returncode == 0 and result.stdout.strip() == '192.0.2.10', result
+        assert calls.read_text().splitlines() == ['yeney --list-rooms --details'] + (
+            ['noson --list-rooms --details'] if fallback == '1' else [])
+print('PASS: AUTO discovery explicitly selects yeney, uses noson only after yeney failure')

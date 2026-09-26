@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """SOAP/CLI checks for device-test.sh; standard library only, no bridge state."""
 import argparse
+import json
+from pathlib import Path
 import socket
 import time
 import urllib.error
@@ -74,34 +76,96 @@ def reltime(fields):
 
 
 def progress(host, lms, port, player, window=6, clock=time.monotonic, sleep=time.sleep,
-             read_soap=soap, read_lms=lms_fields):
-    deadline = clock() + window
+             read_soap=soap, read_lms=lms_fields, startup=10):
+    deadline = clock() + startup
+    phase = f'clocks did not start increasing within {startup:g} s'
+    first = last = baseline = None
+
+    def measured():
+        def pair(value):
+            return 'unavailable' if value is None else f'speaker {value[0]:g}s, LMS {value[1]:g}s'
+        return f'initial [{pair(first)}]; measuring from [{pair(baseline)}]; last [{pair(last)}]'
+
     def sample():
         remaining = deadline - clock()
         if remaining <= 0:
-            raise TimeoutError('six-second progress window expired')
+            raise TimeoutError('sampling deadline expired')
         position = reltime(read_soap(host, 'GetPositionInfo', timeout=min(1, remaining)))
         remaining = deadline - clock()
         if remaining <= 0:
-            raise TimeoutError('six-second progress window expired')
+            raise TimeoutError('sampling deadline expired')
         lms_time = float(read_lms(lms, port, player, timeout=min(1, remaining))['time'])
         return position, lms_time
-    start = sample()
-    last = start
+
+    increasing = [False, False]
+    last_error = ''
+    while clock() < deadline:
+        try:
+            current = sample()
+            if first is None:
+                first = last = current
+            else:
+                previous, last = last, current
+                # A reset on resume is not forward progress.
+                increasing = [False if b < a else seen or b > a
+                              for seen, a, b in zip(increasing, previous, last)]
+                if clock() <= deadline and all(increasing):
+                    baseline = last
+                    break
+        except Exception as error:
+            last_error = str(error)
+        sleep(min(.25, max(0, deadline - clock())))
+    if baseline is None:
+        raise RuntimeError(f'{phase}; {measured()}; last read error: {last_error or "none"}')
+
+    deadline = clock() + window
+    last_error = ''
     while clock() < deadline:
         sleep(min(.25, max(0, deadline - clock())))
         if clock() >= deadline:
             break
-        last = sample()
-        if clock() <= deadline and all(b - a >= 3 for a, b in zip(start, last)):
-            return f'audio continues: speaker {start[0]:g}->{last[0]:g}s; LMS {start[1]:g}->{last[1]:g}s'
-    raise RuntimeError(f'audio did not advance 3 s within 6 s: speaker {start[0]:g}->{last[0]:g}; LMS {start[1]:g}->{last[1]:g}')
+        try:
+            last = sample()
+            if clock() <= deadline and all(b - a >= 3 for a, b in zip(baseline, last)):
+                return f'audio continues: {measured()}'
+        except Exception as error:
+            last_error = str(error)
+    raise RuntimeError(f'audio did not advance 3 s within {window:g} s after both clocks started; '
+                       f'{measured()}; last read error: {last_error or "none"}')
+
+
+def status_sample(host, read_soap):
+    record = {'timestamp': time.time()}
+    try:
+        fields = read_soap(host, 'GetTransportInfo')
+        record.update(state=fields['CurrentTransportState'], status=fields['CurrentTransportStatus'])
+    except Exception as error:
+        record['error'] = str(error)
+    return record
+
+
+def check_status_log(text):
+    if not text.strip():
+        raise RuntimeError('cannot check: empty GetTransportInfo sample log')
+    errors = []
+    for number, line in enumerate(text.splitlines(), 1):
+        try:
+            record = json.loads(line)
+            if record.get('error') or record.get('status') != 'OK' or not record.get('state'):
+                errors.append(f'sample {number}: CurrentTransportStatus={record.get("status", "missing")} '
+                              f'{record.get("error", "")}')
+        except (ValueError, AttributeError):
+            errors.append(f'cannot check sample {number}: invalid record {line!r}')
+    if errors:
+        raise RuntimeError('; '.join(errors))
+    return f'{len(text.splitlines())} GetTransportInfo samples: status OK'
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['coordinator', 'command', 'progress', 'monitor', 'state'])
+    parser.add_argument('operation', choices=['coordinator', 'command', 'progress', 'monitor', 'state', 'sample', 'status-log'])
     parser.add_argument('--host')
+    parser.add_argument('--file')
     parser.add_argument('--room')
     parser.add_argument('--action', choices=['Pause', 'Play'])
     parser.add_argument('--lms')
@@ -118,16 +182,15 @@ def main():
         if fields.get('CurrentTransportStatus') != 'OK':
             raise RuntimeError(f'CurrentTransportStatus={fields.get("CurrentTransportStatus", "missing")}')
         print(fields['CurrentTransportState'])
+    elif args.operation == 'sample':
+        print(json.dumps(status_sample(args.host, soap)), flush=True)
+    elif args.operation == 'status-log':
+        print(check_status_log(Path(args.file).read_text()))
     elif args.operation == 'progress':
         print(progress(args.host, args.lms, args.port, args.player))
     else:
         while True:
-            try:
-                status = soap(args.host, 'GetTransportInfo')['CurrentTransportStatus']
-                if status != 'OK':
-                    print(f'CurrentTransportStatus={status}', flush=True)
-            except Exception as error:
-                print(f'GetTransportInfo: {error}', flush=True)
+            print(json.dumps(status_sample(args.host, soap)), flush=True)
             time.sleep(.5)
 
 

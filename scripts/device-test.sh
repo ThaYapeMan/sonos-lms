@@ -60,10 +60,14 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 OUT=${OUT:-/tmp/sonos-test-$STAMP}
 mkdir -p "$OUT"
 START_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+START_EPOCH=$(date +%s)
+JOURNAL_SINCE="@$START_EPOCH"
+JOURNAL_CHECKED=0
 PIDS=()
 DEBUG_RESTORE=()
 AUTO_HELPER=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/device_test_auto.py
 AUTO_REASONS=()
+AUTO_MEASUREMENTS=()
 SUMMARY=()
 AUTO_FAILED=0
 AUTO_MONITOR_PID=''
@@ -215,10 +219,30 @@ sonos_state() {
 # Which song the speaker is playing, from the bridge journal:
 #   "Creating new stream (N)" + "PlaySqueezeBox: title='...'" map stream N to a song;
 #   "speaker URI: stream=N session=TOKEN" reports the actual transport URI.
-# Filter before limiting: periodic status boxes must not age out URI/song identity.
+# Some systemd versions combine --grep and -n incorrectly. Read the run's
+# complete journal first, then filter locally; retain session reset records.
+journal_plain() {
+    journalctl -u "$UNIT" --since "$JOURNAL_SINCE" -o cat --no-pager
+}
 journal_tail() {
-    have journalctl && journalctl -u "$UNIT" -n 600 -o cat --no-pager \
-        --grep='^(Creating new stream|PlaySqueezeBox: title=|speaker URI:|Stream session:)' 2>/dev/null
+    journal_plain | grep -E '^(Creating new stream|PlaySqueezeBox: title=|speaker URI:|Stream session:)'
+}
+journal_self_check() {
+    [[ $JOURNAL_CHECKED == 0 ]] || return 0
+    local plain filtered attempt
+    for attempt in 1 2 3; do
+        plain=$(journal_plain | sed -n '/^Creating new stream (/p' | tail -n1)
+        filtered=$(journal_tail | sed -n '/^Creating new stream (/p' | tail -n1)
+        if [[ -n $plain && $plain == "$filtered" ]]; then
+            JOURNAL_CHECKED=1
+            mark "journal reader self-check OK: $plain"
+            return 0
+        fi
+        sleep .2
+    done
+    local reason="Journal reader self-check failed: plain journalctl newest '${plain:-missing}', journal_tail newest '${filtered:-missing}'; aborting run"
+    if [[ $AUTO == 1 ]]; then auto_fail "$reason"; auto_record "${s:-setup}"; fi
+    fail "$reason"
 }
 bridge_stream() { journal_tail | sed -n 's/^Creating new stream (\([0-9]*\)).*/\1/p' | tail -n1; }
 speaker_stream() {
@@ -385,6 +409,7 @@ setup_playing_a() {
         sleep 0.5
     done
     wait_s 8
+    journal_self_check
     # Preconditions: speaker really PLAYING, LMS position really advancing.
     # A stalled start (speaker kept a connection that gets no audio) shows
     # LMS mode=play with a position cycling near zero.
@@ -404,7 +429,7 @@ setup_playing_a() {
 
 scenario_1() {
     mark "S1 BASELINE: LMS starts track A, LMS pause/resume (expected clean)"
-    play_track "$TRACK_A_ID"; wait_s 20; snapshot
+    play_track "$TRACK_A_ID"; wait_s 20; journal_self_check; snapshot
     local tp
     mark "S1 LMS pause";  lms pause 1; wait_s 5; snapshot
     if [[ $AUTO == 1 ]]; then
@@ -600,11 +625,21 @@ resolve_lms_host() {
     return 0
 }
 
+discover_coordinator() {
+    local details
+    if ! details=$(SONOS_LMS_UPNP=yeney ./sonos-lms --list-rooms --details); then
+        say "yeney discovery failed; retrying with noson"
+        details=$(SONOS_LMS_UPNP=noson ./sonos-lms --list-rooms --details) || return 1
+    fi
+    printf '%s\n' "$details" | python3 "$AUTO_HELPER" coordinator --room "$ROOM"
+}
+
 # AUTO failures accumulate; recovery can never erase a failed check.
 auto_fail() { AUTO_REASONS+=("$*"); }
 auto_progress() {
     local result
     if result=$(python3 "$AUTO_HELPER" progress --host "$COORDINATOR_IP" --lms "$LMS" --port "$CLI_PORT" --player "$PLAYER" 2>&1); then
+        AUTO_MEASUREMENTS+=("$result")
         mark "AUTO $result"
     else
         auto_fail "$result"
@@ -612,6 +647,7 @@ auto_progress() {
 }
 auto_begin() {
     AUTO_REASONS=()
+    AUTO_MEASUREMENTS=()
     AUTO_SINCE=$(date '+%Y-%m-%d %H:%M:%S.%6N')
     AUTO_STATUS_FILE="$OUT/auto-status-$1.log"
     python3 "$AUTO_HELPER" monitor --host "$COORDINATOR_IP" > "$AUTO_STATUS_FILE" 2>&1 &
@@ -619,13 +655,16 @@ auto_begin() {
 }
 auto_end() {
     local errors
-    # A final synchronous sample ensures even a short scenario has status evidence.
-    if ! errors=$(python3 "$AUTO_HELPER" state --host "$COORDINATOR_IP" 2>&1); then
-        auto_fail "final transport read: $errors"
-    fi
     kill "$AUTO_MONITOR_PID" 2>/dev/null; wait "$AUTO_MONITOR_PID" 2>/dev/null
     AUTO_MONITOR_PID=''
-    if [[ -s $AUTO_STATUS_FILE ]]; then auto_fail "$(cat "$AUTO_STATUS_FILE")"; fi
+    [[ -s $AUTO_STATUS_FILE ]] || auto_fail "cannot check: empty GetTransportInfo sample log ($AUTO_STATUS_FILE)"
+    # Retain the final read too, without hiding a monitor that produced no samples.
+    python3 "$AUTO_HELPER" sample --host "$COORDINATOR_IP" >> "$AUTO_STATUS_FILE" 2>&1
+    if errors=$(python3 "$AUTO_HELPER" status-log --file "$AUTO_STATUS_FILE" 2>&1); then
+        mark "AUTO $errors"
+    else
+        auto_fail "$errors"
+    fi
     if errors=$(journalctl -u "$UNIT" --since "$AUTO_SINCE" -o cat --no-pager 2>&1); then
         errors=$(printf '%s\n' "$errors" | grep -E 'ERROR_[A-Z_]+' || true)
         [[ -z $errors ]] || auto_fail "$errors"
@@ -642,7 +681,7 @@ auto_record() {
         SUMMARY+=("S$1 | FAIL | $reason")
         AUTO_FAILED=1
     else
-        SUMMARY+=("S$1 | PASS | progress, position/song and transport checks passed")
+        SUMMARY+=("S$1 | PASS | progress, position/song and transport checks passed${AUTO_MEASUREMENTS[*]:+; ${AUTO_MEASUREMENTS[*]}}")
     fi
 }
 auto_summary() {
@@ -682,7 +721,7 @@ read -r -p "Press Enter to start " _ || true
 else
     have python3 || fail "AUTO requires python3"
     [[ -n ${SCENARIOS// /} && $S2_ROUNDS =~ ^[1-9][0-9]*$ && $LONG_PAUSE =~ ^[0-9]+$ ]] || fail "AUTO needs scenarios, positive S2_ROUNDS and nonnegative LONG_PAUSE"
-    COORDINATOR_IP=$(./sonos-lms --list-rooms --details | python3 "$AUTO_HELPER" coordinator --room "$ROOM") || fail "AUTO coordinator discovery failed"
+    COORDINATOR_IP=$(discover_coordinator) || fail "AUTO coordinator discovery failed"
     TRACK_B_TITLE=$(field "$(cli_raw "songinfo 0 100 track_id:$TRACK_B_ID")" title)
     [[ -n $TRACK_B_TITLE ]] || fail "AUTO could not resolve track B title"
     mark "AUTO coordinator $COORDINATOR_IP; scenarios $SCENARIOS"
@@ -692,7 +731,7 @@ trap finish EXIT
 trap 'exit 130' INT TERM
 start_capture
 mark "RUN START room=$ROOM player=$PLAYER track_a=$TRACK_A_ID track_b=$TRACK_B_ID"
-snapshot
+JOURNAL_SINCE="-5min" snapshot
 
 for s in $SCENARIOS; do
     if [[ $AUTO == 1 ]]; then auto_begin "$s"; fi
