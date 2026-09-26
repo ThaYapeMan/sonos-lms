@@ -12,6 +12,7 @@
 
 #include "sbstreamer.h"
 #include "stream_session.h"
+#include "stream_close_log.h"
 
 #include "sbencoder.h"
 #include "sonos-position.h"
@@ -55,6 +56,9 @@ struct StreamRequest {
     std::atomic<bool> resumeAcknowledged{false};
     std::atomic<bool> serving{false};
 };
+static bridge::StreamCloseLog closeLog;
+static std::atomic<bool> deferCloseLog{false};
+extern "C" void configure_squeezebox_close_logging(bool own) { deferCloseLog = own; }
 static unsigned long long nextRequestId = 0;
 static unsigned ownershipStream = 0;
 static std::shared_ptr<StreamRequest> activeRequest;
@@ -69,6 +73,7 @@ static void activateRequest(const std::shared_ptr<StreamRequest>& request, bool 
     sonos_position_connection(request->stream, request->id);
     activeRequest = request;
     g_enc = request->encoder;
+    if (promoted && deferCloseLog) closeLog.observe(request->stream);
     if (promoted) request->expectedCloseAt = std::chrono::steady_clock::now();
     if (promoted)
         printf("stream %u: GET #%llu promoted\n", request->stream, request->id);
@@ -88,6 +93,7 @@ static void endSqueezeboxResponse(bool flush)
 {
     std::lock_guard<std::mutex> lock(g_enc_mutex);
     endedByPause = get_squeezebox_stream_id();
+    if (deferCloseLog) closeLog.observe(endedByPause);
     if (activeRequest) activeRequest->expectedCloseAt = std::chrono::steady_clock::now();
     const bool preserve = flush && activeRequest && activeRequest->heldResume
         && !activeRequest->serving;
@@ -102,6 +108,7 @@ static void endSqueezeboxResponse(bool flush)
 
 extern "C" void note_squeezebox_device_close(void)
 {
+    if (deferCloseLog) closeLog.observe(get_squeezebox_stream_id());
     std::lock_guard<std::mutex> lock(g_enc_mutex);
     if (activeRequest) activeRequest->expectedCloseAt = std::chrono::steady_clock::now();
 }
@@ -116,6 +123,21 @@ void hold_squeezebox_resume(unsigned stream)
     if (activeRequest && activeRequest->stream == stream && !activeRequest->encoder->hasAudio()
         && !activeRequest->encoder->responseEnded() && !activeRequest->encoder->cancelled())
         activeRequest->heldResume = true;
+}
+
+int squeezebox_response_streaming(unsigned stream)
+{
+    std::lock_guard<std::mutex> lock(g_enc_mutex);
+    return activeRequest && activeRequest->stream == stream && activeRequest->serving
+        && g_enc && g_enc->hasAudio() && !g_enc->cancelled() && !g_enc->responseEnded();
+}
+
+int squeezebox_request_open(unsigned stream)
+{
+    std::lock_guard<std::mutex> lock(g_enc_mutex);
+    if (activeRequest && activeRequest->stream == stream) return 1;
+    for (const auto& request : standbyRequests) if (request->stream == stream) return 1;
+    return 0;
 }
 
 int squeezebox_response_open(unsigned stream)
@@ -375,6 +397,10 @@ void SBStreamer::streamSqueezeBox(upnp::StreamRequest* handle, int stream)
             sendFailed = true;
             const double seconds = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - responseStarted).count();
+            if (deferCloseLog && (error == EPIPE || error == ECONNRESET)) {
+                closeLog.failed(stream, seconds, sent, error);
+                return false;
+            }
             bool expected = false;
             {
                 std::lock_guard<std::mutex> lock(g_enc_mutex);

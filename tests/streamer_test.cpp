@@ -21,6 +21,7 @@
 #include <vector>
 
 extern "C" void note_squeezebox_device_close(void);
+extern "C" void configure_squeezebox_close_logging(bool own);
 using namespace SONOS;
 using bridge::SBStreamer;
 static std::atomic<unsigned> generation(1), resumeCommands(0), sameURLRequests(0);
@@ -92,7 +93,7 @@ public:
             return false;
         }
         if (failureFd >= 0) return ::send(failureFd, data, n, MSG_NOSIGNAL) == static_cast<ssize_t>(n);
-        if (drop || clientClosed.load() || sendError.load()) { errno = ECONNRESET; return false; }
+        if (drop || clientClosed.load() || sendError.load()) { errno = sendError ? closeError : ECONNRESET; return false; }
         wire.append(data, n);
         if (n == 5 && memcmp(data, "0\r\n\r\n", 5) == 0) {
             assert(!disconnected); eof = true; return true;
@@ -384,6 +385,27 @@ static void sessionTest() {
 }
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]).find("own-close-") == 0) {
+        configure_squeezebox_close_logging(true);
+        const std::string mode = argv[1];
+        SBStreamer broker;
+        Socket broken(1);
+        broken.sendError = true;
+        if (mode == "own-close-after") broken.closeError = EPIPE;
+        if (mode == "own-close-before") note_squeezebox_device_close();
+        auto start = std::chrono::steady_clock::now();
+        serve(broker, broken);
+        assert(broken.disconnected);
+        assert(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(500));
+        puts("Socket cleanup completed without waiting for log classification");
+        if (mode == "own-close-after" || mode == "own-close-other-stream" || mode == "own-close-end") {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (mode == "own-close-other-stream") generation = 2;
+            if (mode == "own-close-end") end_squeezebox_response();
+            else note_squeezebox_device_close();
+        }
+        return 0;
+    }
     if (argc > 1 && std::string(argv[1]).find("close-") == 0) {
         const std::string mode = argv[1];
         SBStreamer broker;
@@ -394,7 +416,8 @@ int main(int argc, char** argv) {
         assert(broken.disconnected);
         return 0;
     }
-    if (argc > 1 && std::string(argv[1]) == "promotion-close") {
+    if (argc > 1 && (std::string(argv[1]) == "promotion-close" || std::string(argv[1]) == "own-promotion-close")) {
+        if (std::string(argv[1]) == "own-promotion-close") configure_squeezebox_close_logging(true);
         SBStreamer broker;
         Socket active(1, false, true), standby(1, false, true);
         auto first = std::async(std::launch::async, [&] { serve(broker, active); });

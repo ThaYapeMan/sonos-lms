@@ -4,8 +4,9 @@
 #include <cstdio>
 #include <limits>
 namespace upnp {
-OwnSpeakerControl::OwnSpeakerControl(std::function<unsigned()> port, unsigned controlPort)
-    : streamPort(std::move(port)), speakerPort(controlPort) {}
+OwnSpeakerControl::OwnSpeakerControl(std::function<unsigned()> port, unsigned controlPort,
+                                     std::function<StreamActivity()> activity)
+    : streamPort(std::move(port)), speakerPort(controlPort), streamActivity(std::move(activity)) {}
 Speaker OwnSpeakerControl::speaker() const { std::lock_guard<std::mutex> lock(cacheMutex); return selected; }
 TransportInfo OwnSpeakerControl::transportInfo() { std::lock_guard<std::mutex> lock(cacheMutex); return cachedTransport; }
 std::string OwnSpeakerControl::controllerUri() {
@@ -20,11 +21,15 @@ unsigned OwnSpeakerControl::actionTimeoutMs(const std::string& action) {
 uint8_t OwnSpeakerControl::displayVolume() {
     std::lock_guard<std::mutex> lock(cacheMutex); return volume;
 }
+bool OwnSpeakerControl::paused() const {
+    return cachedTransport.state == "STOPPED" || cachedTransport.state == "PAUSED_PLAYBACK";
+}
 SoapResult OwnSpeakerControl::call(const std::string& action, const SoapArguments& args,
                                   const std::string& host, const std::string& service) {
     const std::string address = host.empty() ? speaker().ip : host;
     const auto path = service == "ZoneGroupTopology" ? "/ZoneGroupTopology/Control" :
         service == "RenderingControl" ? "/MediaRenderer/RenderingControl/Control" : "/MediaRenderer/AVTransport/Control";
+    const auto activityBefore = action == "GetPositionInfo" && streamActivity ? streamActivity() : StreamActivity{};
     auto http = httpPost({address, path, speakerPort}, {
         {"Content-Type", "text/xml"},
         {"SOAPACTION", "\"urn:schemas-upnp-org:service:" + service + ":1#" + action + "\""}
@@ -37,8 +42,15 @@ SoapResult OwnSpeakerControl::call(const std::string& action, const SoapArgument
     if (!result.faultCode.empty() || !result.faultDescription.empty()) {
         printf("UPnP %s fault %s: %s\n", action.c_str(), result.faultCode.c_str(), result.faultDescription.c_str());
     } else if (!http.error.empty() || http.status != 200 || !result.ok) {
-        printf("UPnP %s failed: %s (HTTP %u)\n", action.c_str(),
-            http.error.empty() ? "invalid SOAP response" : http.error.c_str(), http.status);
+        const auto activity = streamActivity ? streamActivity() : StreamActivity{};
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        if (action == "GetPositionInfo" && http.error == "timeout" && paused() && (activityBefore.requestOpen || activity.requestOpen)) {
+            if (!pauseTimeoutLogged) printf("UPnP GetPositionInfo: no reply while speaker holds a stream request (paused)\n");
+            pauseTimeoutLogged = true;
+        } else {
+            printf("UPnP %s failed: %s (HTTP %u)\n", action.c_str(),
+                http.error.empty() ? "invalid SOAP response" : http.error.c_str(), http.status);
+        }
     }
     result.ok = result.ok && http.error.empty() && http.status == 200;
     return result;
@@ -118,7 +130,11 @@ bool OwnSpeakerControl::playStream(const std::string& url, const std::string& ti
     XmlNode item;
     if (!parseXml(metadata, item) || !item.child("item")) return false;
     const auto uri = item.child("item")->value("res");
-    { std::lock_guard<std::mutex> lock(cacheMutex); sentTitle = title; cachedTransport.title = title; }
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        freshStreamPosition = sentUrl != url;
+        sentTitle = title; sentUri = uri; sentUrl = url; cachedTransport.title = title;
+    }
     return call("SetAVTransportURI", {{"InstanceID", "0"}, {"CurrentURI", uri}, {"CurrentURIMetaData", metadata}}).ok && play();
 }
 bool OwnSpeakerControl::play() { return call("Play", {{"InstanceID", "0"}, {"Speed", "1"}}).ok; }
@@ -132,7 +148,18 @@ bool OwnSpeakerControl::currentUri(std::string& uri) {
 }
 bool OwnSpeakerControl::positionInfo(uint32_t& ms, std::string* text) {
     std::lock_guard<std::mutex> lock(positionMutex);
-    if (Clock::now() >= positionAt) {
+    const auto activity = streamActivity ? streamActivity() : StreamActivity{};
+    bool fresh;
+    {
+        std::lock_guard<std::mutex> cache(cacheMutex);
+        fresh = freshStreamPosition;
+        if (paused() && !activity.streaming && !fresh) {
+            ms = positionMs; if (text && positionKnown) *text = positionText;
+            return positionKnown;
+        }
+        freshStreamPosition = false;
+    }
+    if (fresh || Clock::now() >= positionAt) {
         auto result = call("GetPositionInfo", {{"InstanceID", "0"}});
         if (!result.ok) return false;
         const auto time = result.response.value("RelTime");
@@ -147,8 +174,15 @@ bool OwnSpeakerControl::positionInfo(uint32_t& ms, std::string* text) {
             const auto xml = result.response.value("TrackMetaData");
             const auto valid = parseXml(xml, metadata);
             const auto item = valid ? metadata.child("item") : nullptr;
-            cachedTransport.title = item && !item->value("title").empty() ? item->value("title") : sentTitle;
+            const auto title = item ? item->value("title") : "";
+            const auto query = sentUrl.find('?');
+            const auto baseStart = sentUrl.rfind('/', query);
+            const auto basename = sentUrl.substr(baseStart == std::string::npos ? 0 : baseStart + 1);
+            const auto bare = basename.substr(0, basename.find('?'));
+            cachedTransport.title = title.empty() || title == sentUrl || title == sentUri
+                || title == basename || title == bare ? sentTitle : title;
         }
+        positionKnown = true;
         positionMs = (h * 3600 + m * 60 + s) * 1000; positionText = time;
         positionAt = Clock::now() + std::chrono::seconds(1);
     }
@@ -159,7 +193,10 @@ bool OwnSpeakerControl::readTransportInfo(TransportInfo& info) {
     std::lock_guard<std::mutex> lock(cacheMutex);
     cachedTransport.available = result.ok && result.response.child("CurrentTransportState") && result.response.child("CurrentTransportStatus");
     if (cachedTransport.available) {
+        const bool wasPaused = paused();
         cachedTransport.state = result.response.value("CurrentTransportState");
+        if (wasPaused && !paused()) freshStreamPosition = true;
+        if (!paused() || !wasPaused) pauseTimeoutLogged = false;
         cachedTransport.status = result.response.value("CurrentTransportStatus");
     }
     info = cachedTransport;

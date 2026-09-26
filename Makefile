@@ -58,6 +58,7 @@ test: sonos-lms position-test encoder-test resume-state-test streamer-test upnp-
 	python3 tests/list_rooms_test.py
 	python3 tests/installer_test.py
 	python3 tests/upnp_mock_test.py
+	python3 tests/own_display_test.py
 	./position-test
 	python3 tests/send_error_test.py
 	./streamer-test session
@@ -111,3 +112,5 @@ noson-golden: tests/noson_golden.cpp noson/noson/libnoson.a
 upnp/encoded_buffer.o sbencoder.o: upnp/encoded_buffer.h
 
 sonos-lms.o: upnp/list_rooms.h
+
+sbstreamer.o streamer-test: stream_close_log.h

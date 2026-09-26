@@ -88,6 +88,9 @@ extern "C" void flush_squeezebox_response(void);
 extern "C" void hold_squeezebox_resume(unsigned stream);
 extern "C" int squeezebox_response_ended(unsigned stream);
 extern "C" int squeezebox_response_open(unsigned stream);
+extern "C" int squeezebox_response_streaming(unsigned stream);
+extern "C" int squeezebox_request_open(unsigned stream);
+extern "C" void configure_squeezebox_close_logging(bool own);
 extern "C" void acknowledge_squeezebox_resume(unsigned stream);
 extern "C" void invalidate_squeezebox_held_get(unsigned stream);
 static std::mutex stopMutex;
@@ -854,10 +857,14 @@ int main(int argc, char** argv)
 
     printf("\n\n| sonos-lms -- bridges a Sonos zone player into an LMS/squeezelite session\n\n\n");
 
+    configure_squeezebox_close_logging(backend == upnp::Backend::Own);
     auto serverBackend = new upnp::NosonStreamServer(debugLevel, onSonosEvent);
     gStreamServer.reset(serverBackend);
     if (backend == upnp::Backend::Own)
-        gPlayer = std::make_shared<upnp::OwnSpeakerControl>([] { return gStreamServer->port(); });
+        gPlayer = std::make_shared<upnp::OwnSpeakerControl>([] { return gStreamServer->port(); }, 1400, [] {
+            const auto id = streamId.load();
+            return upnp::StreamActivity{bool(squeezebox_response_streaming(id)), bool(squeezebox_request_open(id))};
+        });
     else
         gPlayer = std::make_shared<upnp::NosonSpeakerControl>(*serverBackend, onSonosEvent);
     if (!room) {
