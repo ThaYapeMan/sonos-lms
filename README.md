@@ -454,11 +454,20 @@ SONOS_LMS_UPNP=yeney ./sonos-lms --room="Sonos Port" --server=192.0.2.10
 
 For a service, set `Environment=SONOS_LMS_UPNP=yeney` in its systemd override.
 yeney discovers speakers with SSDP, maps room/group topology, and sends SOAP
-control directly. Transport state is polled every 500 ms instead of using GENA
-events; slow/failed calls can extend that interval. Group changes are logged only:
+control directly. Transport state is also polled every 500 ms; slow/failed calls
+can extend that interval. Group changes are logged only:
 this phase does not coordinate grouped-room transport or LMS sync. The HTTP stream,
 artwork and file server still use noson in both modes. Pause defaults to Stop and
 all existing stream/session/resume rules remain in effect.
+
+**Events (GENA).** yeney subscribes to the group coordinator's AVTransport
+LastChange events, so Sonos-app Play can resume LMS even while the speaker holds
+a stream GET and delays SOAP replies. Events update the cache immediately; older
+in-flight polls cannot overwrite them. Subscriptions renew halfway through the
+granted timeout, follow coordinator changes, and unsubscribe on clean shutdown.
+Subscription failures are logged and leave polling available. The separate event
+listener uses an ephemeral TCP port on `0.0.0.0`; set `SONOS_LMS_EVENT_PORT` to
+choose a fixed callback port.
 
 See [the UPnP layer inventory and wire fixtures](docs/upnp-layer.md). No SMAPI
 library service or external-playback ownership policy is enabled by this switch.
