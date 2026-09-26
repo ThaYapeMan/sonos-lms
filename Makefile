@@ -114,3 +114,6 @@ upnp/encoded_buffer.o sbencoder.o: upnp/encoded_buffer.h
 sonos-lms.o: upnp/list_rooms.h
 
 sbstreamer.o streamer-test: stream_close_log.h
+
+sonos-lms.o sonos-status.o: sonos-status.h
+sonos-status.o: speaker_uri.h stream_session.h

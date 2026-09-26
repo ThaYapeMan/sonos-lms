@@ -11,6 +11,8 @@
 // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 
 #include "sonos-status.h"
+#include "speaker_uri.h"
+#include "stream_session.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -66,6 +68,13 @@ void Status::update()
 {
     if (m_player) m_player->poll();
     m_current = poll();
+    if (m_player) {
+        const auto info = m_player->transportInfo();
+        if (info.uriKnown && (!m_haveUri || info.uri != m_lastUri)) {
+            m_haveUri = true; m_lastUri = info.uri;
+            printf("speaker URI: %s\n", speakerUriDescription(info.uri, streamSessionToken()).c_str());
+        }
+    }
 }
 
 bool Status::changed()

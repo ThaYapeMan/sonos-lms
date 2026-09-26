@@ -26,6 +26,7 @@ HttpResponse httpPost(const HttpUrl&, const std::map<std::string, std::string>& 
     if (action == "GetTransportInfo") fields = {{"CurrentTransportState", state}, {"CurrentTransportStatus", "OK"}};
     if (action == "GetPositionInfo") fields = {{"RelTime", "0:02:03"}, {"TrackDuration", "0:04:56"},
         {"TrackMetaData", "<DIDL-Lite><item><title>" + xmlEscape(title) + "</title></item></DIDL-Lite>"}};
+    if (action == "GetMediaInfo") fields = {{"CurrentURI", "x-rincon-mp3radio://bridge/stream?session=fixture&stream=21"}};
     if (action == "GetVolume") fields = {{"CurrentVolume", "37"}};
     return {200, soapBody("AVTransport", action + "Response", fields), "127.0.0.1", ""};
 }
@@ -33,6 +34,10 @@ HttpResponse httpPost(const HttpUrl&, const std::map<std::string, std::string>& 
 int main() {
     upnp::OwnSpeakerControl control([] { return 1400u; }, 1400, [&] { return activity; });
     assert(control.discover("Study", "127.0.0.1"));
+    control.poll();
+    assert(control.transportInfo().uriKnown);
+    assert(control.transportInfo().uri == "x-rincon-mp3radio://bridge/stream?session=fixture&stream=21");
+    puts("PASS: own polling caches observed CurrentURI independently of TrackMetaData title");
     unsigned stream = 0;
     uint32_t ms;
     for (const auto variant : {"URL", "basename/query", "basename", "empty", "real title"}) {

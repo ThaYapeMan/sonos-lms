@@ -72,6 +72,8 @@ private:
     Snapshot m_current;
     Snapshot m_lastReported;
     bool m_haveReported = false;
+    bool m_haveUri = false;
+    std::string m_lastUri;
 
     Snapshot poll() const;
 };

@@ -239,10 +239,24 @@ device involved:
 Two Python-driven C++ fixtures also extract the production transport functions
 and LMS discovery/config parsers. Discovery tests perform no UDP I/O.
 
-These pin down the transport/stream state machine logic exhaustively, but none of
-it proves anything about a real speaker. Before trusting a transport-code change,
-run through [DEVICE-VERIFICATION.md](DEVICE-VERIFICATION.md) against an actual
-Sonos player by hand.
+These check the transport and stream state machines, but do not prove behavior
+on a real speaker. Use the levels below and [DEVICE-VERIFICATION.md](DEVICE-VERIFICATION.md)
+to choose the physical checks appropriate to a change.
+
+### Device test levels
+
+- **Level 0 — no physical test:** display, logging and installer changes. Run `make` and `make test` locally.
+- **Level 1 — unattended:** for stream and pause logic changes, run `sudo env AUTO=1 scripts/device-test.sh` on the deployment host. It discovers the room's coordinator, sends AVTransport Pause/Play directly, checks speaker and LMS time advance by at least three seconds within six seconds after resume, checks continued position and track changes, and monitors transport status and journal errors. It prints a PASS/FAIL table and exits nonzero if any scenario fails. This measures playback progress; it cannot hear audio or inspect app dialogs.
+- **Level 2 — real Sonos app:** occasionally run `sudo scripts/device-test.sh` and follow the existing app prompts, especially to confirm audible playback and app behavior. `QUICK=1` keeps this manual flow with shorter defaults.
+
+AUTO and QUICK default to `SCENARIOS="1 2 5 6 7" S2_ROUNDS=1 LONG_PAUSE=30`;
+explicit environment values override these defaults. Normal manual mode retains
+scenarios 1–7, three S2 rounds and a 120-second long pause. AUTO requires Python 3,
+`./sonos-lms --list-rooms --details`, coordinator reachability on port 1400, LMS CLI
+access and the room's journal; run it from the repository directory. The bridge
+logs `speaker URI: stream=N session=<token>` independently of the displayed title.
+Unknown or external URIs do not count as successful stream detection in AUTO.
+Agents never SSH to or deploy on LXC 113; the owner runs physical tests there.
 
 ## Where it falls short
 
@@ -376,19 +390,3 @@ GPL-compatible outbound license -- no additional, more restrictive terms (e.g. a
 noncommercial clause) can be layered on top.
 
 Copyright (C) 2026 Jaap van Vliet
-
-
-## Device test levels
-
-- **Level 0 — no physical test:** display, logging and installer changes. Run `make` and `make test` locally.
-- **Level 1 — unattended:** for stream and pause logic changes, run `sudo env AUTO=1 scripts/device-test.sh` on the deployment host. It discovers the room's coordinator, sends AVTransport Pause/Play directly, checks speaker and LMS time advance by at least three seconds within six seconds after resume, checks continued position and track changes, and monitors transport status and journal errors. It prints a PASS/FAIL table and exits nonzero if any scenario fails. This measures playback progress; it cannot hear audio or inspect app dialogs.
-- **Level 2 — real Sonos app:** occasionally run `sudo scripts/device-test.sh` and follow the existing app prompts, especially to confirm audible playback and app behavior. `QUICK=1` keeps this manual flow with shorter defaults.
-
-AUTO and QUICK default to `SCENARIOS="1 2 5 6 7" S2_ROUNDS=1 LONG_PAUSE=30`;
-explicit environment values override these defaults. Normal manual mode retains
-scenarios 1–7, three S2 rounds and a 120-second long pause. AUTO requires Python 3,
-`./sonos-lms --list-rooms --details`, coordinator reachability on port 1400, LMS CLI
-access and the room's journal; run it from the repository directory. The bridge
-logs `speaker URI: stream=N session=<token>` independently of the displayed title.
-Unknown or external URIs do not count as successful stream detection in AUTO.
-Agents never SSH to or deploy on LXC 113; the owner runs physical tests there.

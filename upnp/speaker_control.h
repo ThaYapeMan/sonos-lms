@@ -14,6 +14,8 @@ struct TransportInfo {
     // Display fields retained so the noson adapter preserves the existing table.
     std::string title, album, artist, duration;
     bool available = false;
+    std::string uri;
+    bool uriKnown = false;
 };
 class SpeakerControl {
 public:

@@ -144,7 +144,9 @@ bool OwnSpeakerControl::currentUri(std::string& uri) {
     auto result = call("GetMediaInfo", {{"InstanceID", "0"}});
     const auto current = result.response.child("CurrentURI");
     if (!result.ok || !current) return false;
-    uri = current->text; return true;
+    uri = current->text;
+    { std::lock_guard<std::mutex> lock(cacheMutex); cachedTransport.uri = uri; cachedTransport.uriKnown = true; }
+    return true;
 }
 bool OwnSpeakerControl::positionInfo(uint32_t& ms, std::string* text) {
     std::lock_guard<std::mutex> lock(positionMutex);
@@ -209,6 +211,12 @@ void OwnSpeakerControl::poll() {
     positionInfo(ms);
     if (Clock::now() >= volumeAt) {
         volumeAt = Clock::now() + std::chrono::seconds(1);
+        std::string uri;
+        const auto activity = streamActivity ? streamActivity() : StreamActivity{};
+        // A held paused GET can stall SOAP replies. Retain the last observed URI
+        // until the probe closes; transport-state polling still runs above.
+        if (!((info.state == "STOPPED" || info.state == "PAUSED_PLAYBACK") && activity.requestOpen))
+            currentUri(uri);
         auto result = call("GetVolume", {{"InstanceID", "0"}, {"Channel", "Master"}}, "", "RenderingControl");
         const auto value = result.response.value("CurrentVolume");
         unsigned parsed; char tail;

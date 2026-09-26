@@ -30,14 +30,25 @@
 #   LMS_LOG     server.log path on the LMS host (default: /var/log/squeezeboxserver/server.log)
 #   LMS_DEBUG   1 = raise LMS log categories for the run, restored afterwards (default: 1)
 #   NO_PCAP     1 = skip tcpdump
+#   AUTO        1 = unattended SOAP commands and measured checks
+#   QUICK       1 = shorter manual run (same defaults as AUTO)
+#   S2_ROUNDS   app/device pause/resume rounds (default: 3; AUTO/QUICK: 1)
 
 set -uo pipefail
 
 ROOM=${ROOM:-Study}
 TRACK_A=${TRACK_A:-Just A Little Bit More}
 TRACK_B=${TRACK_B:-False Need}
+AUTO=${AUTO:-0}
+QUICK=${QUICK:-0}
+if [[ $AUTO == 1 || $QUICK == 1 ]]; then
+    SCENARIOS=${SCENARIOS:-1 2 5 6 7}
+    LONG_PAUSE=${LONG_PAUSE:-30}
+    S2_ROUNDS=${S2_ROUNDS:-1}
+fi
 SCENARIOS=${SCENARIOS:-1 2 3 4 5 6 7}
 LONG_PAUSE=${LONG_PAUSE:-120}
+S2_ROUNDS=${S2_ROUNDS:-3}
 LMS_SSH=${LMS_SSH:-}
 LMS_LOG=${LMS_LOG:-/var/log/squeezeboxserver/server.log}
 LMS_DEBUG=${LMS_DEBUG:-1}
@@ -51,6 +62,12 @@ mkdir -p "$OUT"
 START_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 PIDS=()
 DEBUG_RESTORE=()
+AUTO_HELPER=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/device_test_auto.py
+AUTO_REASONS=()
+SUMMARY=()
+AUTO_FAILED=0
+AUTO_MONITOR_PID=''
+
 
 say()  { printf '%s\n' "$*" >&2; }
 fail() { say "Error: $*"; exit 1; }
@@ -90,7 +107,11 @@ field() {
     return 1
 }
 
-lms() { cli_raw "$PLAYER $*" >/dev/null; }
+lms() {
+    if cli_raw "$PLAYER $*" >/dev/null; then return 0; fi
+    [[ $AUTO != 1 ]] || auto_fail "LMS command failed: $*"
+    return 1
+}
 
 status_line() {
     local r
@@ -129,6 +150,10 @@ resolve_player() {
 
 mark() {
     local line
+    local failure='^(SETUP FAILED:|S[1-7]([.][0-9]+|[ab])? (CHECK MISMATCH:|POSITION RESTARTED:|ABORTED:|INVALID:|RESUME FAIL:|AUTO-START FAIL:|PAUSE NOT CONFIRMED:|NOT PLAYING before))'
+    if [[ $AUTO == 1 && $* =~ $failure ]]; then
+        auto_fail "$*"
+    fi
     line="[$(now)] === $*"
     printf '%s\n' "$line" | tee -a "$OUT/steps.log" >&2
     have logger && logger -t sonos-test "=== $*"
@@ -142,6 +167,18 @@ wait_s() {
 
 # Ask the tester to do something in the Sonos app; mark the moment they confirm.
 prompt() {
+    if [[ $AUTO == 1 ]]; then
+        local action result
+        case "$*" in *'press PAUSE'*) action=Pause ;; *'press PLAY'*) action=Play ;;
+            *) auto_fail "unsupported AUTO prompt: $*"; return 1 ;; esac
+        if result=$(python3 "$AUTO_HELPER" command --host "$COORDINATOR_IP" --action "$action" 2>&1); then
+            mark "AUTO device ${action^^} sent"
+            [[ $action != Play ]] || auto_progress
+        else
+            auto_fail "device $action failed: $result"
+        fi
+        return 0
+    fi
     say ""
     say ">>> $*"
     mark "PROMPT shown: $*"
@@ -151,6 +188,11 @@ prompt() {
 
 # Record what the tester heard.
 observe() {
+    if [[ $AUTO == 1 ]]; then
+        # Track-change scenarios have no Play prompt: check their settled playback here.
+        case "$*" in S3:*|S4:*|S5:*|S5b*) auto_progress ;; esac
+        return 0
+    fi
     local answer
     say ""
     read -r -p "??? $* " answer || true
@@ -161,6 +203,10 @@ observe() {
 # Physical Sonos transport state (PLAYING, PAUSED_PLAYBACK, STOPPED, ...), taken
 # from the bridge's own status table in the journal. Empty if unavailable.
 sonos_state() {
+    if [[ $AUTO == 1 ]]; then
+        python3 "$AUTO_HELPER" state --host "$COORDINATOR_IP" 2>/dev/null
+        return
+    fi
     have journalctl || return 0
     journalctl -u "$UNIT" -n 300 -o cat --no-pager 2>/dev/null \
         | awk -F'|' 'NF >= 6 && $2 !~ /Title/ { st = $3 } END { gsub(/ /, "", st); print st }'
@@ -168,10 +214,23 @@ sonos_state() {
 
 # Which song the speaker is playing, from the bridge journal:
 #   "Creating new stream (N)" + "PlaySqueezeBox: title='...'" map stream N to a song;
-#   the status table's "| Title  squeezebox.flac?session=TOKEN&stream=N |" is what the speaker plays.
-journal_tail() { have journalctl && journalctl -u "$UNIT" -n 600 -o cat --no-pager 2>/dev/null; }
+#   "speaker URI: stream=N session=TOKEN" reports the actual transport URI.
+# Filter before limiting: periodic status boxes must not age out URI/song identity.
+journal_tail() {
+    have journalctl && journalctl -u "$UNIT" -n 600 -o cat --no-pager \
+        --grep='^(Creating new stream|PlaySqueezeBox: title=|speaker URI:|Stream session:)' 2>/dev/null
+}
 bridge_stream() { journal_tail | sed -n 's/^Creating new stream (\([0-9]*\)).*/\1/p' | tail -n1; }
-speaker_stream() { journal_tail | sed -nE 's/^\| Title  *squeezebox\.flac\?([^ ]*&)?stream=([0-9]+).*/\2/p' | tail -n1; }
+speaker_stream() {
+    journal_tail | awk '
+        /^Stream session: / { session = $3; stream = "" }
+        /^speaker URI: stream=[0-9]+ session=/ {
+            split($3, id, "="); split($4, token, "=")
+            stream = (session == "" || session == token[2]) ? id[2] : ""
+        }
+        /^speaker URI: other / { stream = "" }
+        END { print stream }'
+}
 stream_song() {
     [[ -n $1 ]] || return 0
     journal_tail | awk -v n="$1" '
@@ -192,9 +251,9 @@ now_playing() {
 speaker_on_current_song() {
     local bs ss lms_title
     bs=$(bridge_stream); ss=$(speaker_stream)
-    [[ -z $bs || -z $ss ]] && return 0
+    [[ -z $bs || -z $ss ]] && { [[ $AUTO != 1 ]]; return; }
     lms_title=$(field "$(cli_raw "$PLAYER status - 1 tags:a")" title 2>/dev/null)
-    [[ $ss == "$bs" && ( -z $lms_title || $(stream_song "$ss") == "$lms_title" ) ]]
+    [[ $ss == "$bs" && ( ( -z $lms_title && $AUTO != 1 ) || ( -n $lms_title && $(stream_song "$ss") == "$lms_title" ) ) ]]
 }
 # Automatic check after a track change: mark OK or MISMATCH with song names.
 check_song() {
@@ -231,10 +290,11 @@ wait_sonos() {
     local want=$1 i st=''
     for (( i = 0; i < $2 * 2; i++ )); do
         st=$(sonos_state)
-        [[ -z $st || $st =~ ^($want)$ ]] && return 0   # empty = cannot check
+        [[ $st =~ ^($want)$ || ( -z $st && $AUTO != 1 ) ]] && return 0   # empty = cannot check
         sleep 0.5
     done
     say "    speaker state is '$st', expected '$want'"
+    [[ $AUTO != 1 ]] || auto_fail "speaker state ${st:-unknown}, expected $want"
     return 1
 }
 
@@ -288,6 +348,7 @@ start_capture() {
 finish() {
     local entry pid
     trap - EXIT INT TERM
+    if [[ -n $AUTO_MONITOR_PID ]]; then kill "$AUTO_MONITOR_PID" 2>/dev/null; wait "$AUTO_MONITOR_PID" 2>/dev/null; fi
     say ""
     say "Collecting results ..."
     for entry in "${DEBUG_RESTORE[@]}"; do cli_raw "debug $entry" >/dev/null; done
@@ -306,6 +367,7 @@ finish() {
     say ""
     say "Done. Send this file:"
     say "  $OUT.tar.gz"
+    [[ $AUTO != 1 ]] || auto_summary
 }
 
 # ------------------------------------------------------------- scenarios ---
@@ -345,17 +407,21 @@ scenario_1() {
     play_track "$TRACK_A_ID"; wait_s 20; snapshot
     local tp
     mark "S1 LMS pause";  lms pause 1; wait_s 5; snapshot
+    if [[ $AUTO == 1 ]]; then
+        wait_sonos "$PAUSED_STATES" 10
+        [[ $(lms_mode) == pause ]] || auto_fail "S1 LMS did not pause"
+    fi
     tp=$(lms_time)
-    mark "S1 LMS resume"; lms pause 0; wait_s 10; snapshot
+    mark "S1 LMS resume"; lms pause 0; [[ $AUTO != 1 ]] || auto_progress; wait_s 10; snapshot
     position_check "S1" "$tp"
     observe "S1: did it resume where it paused? (c=continued, r=restarted, s=silent, other)"
 }
 
 scenario_2() {
-    mark "S2 SONOS APP pause/resume x3 on track A"
+    mark "S2 SONOS APP pause/resume x$S2_ROUNDS on track A"
     setup_playing_a || return 0
     local i st tp
-    for i in 1 2 3; do
+    for (( i = 1; i <= S2_ROUNDS; i++ )); do
         # Precondition: the speaker really plays the current song. A failed
         # previous resume must not turn into "pause the silence".
         if ! wait_sonos PLAYING 5 || ! speaker_on_current_song; then
@@ -408,9 +474,18 @@ scenario_5() {
     mark "S5 Sonos-app pause, then LMS track change, then check"
     setup_playing_a || return 0
     prompt "S5 press PAUSE in the Sonos app"; wait_s 8; snapshot
+    local previous_stream
+    previous_stream=$(speaker_stream)
+    [[ $AUTO != 1 ]] || wait_sonos "$PAUSED_STATES" 10
     mark "S5 LMS loads track B while Sonos-paused"
     play_track "$TRACK_B_ID"; wait_s 15; snapshot
     check_song "S5"
+    if [[ $AUTO == 1 ]]; then
+        local actual
+        [[ -n $(speaker_stream) && $(speaker_stream) != "$previous_stream" ]] || auto_fail "S5 speaker did not switch to a new stream"
+        actual=$(field "$(cli_raw "$PLAYER status - 1 tags:a")" title 2>/dev/null)
+        [[ -n $TRACK_B_TITLE && $actual == "$TRACK_B_TITLE" ]] || auto_fail "S5 LMS title '$actual', expected track B '$TRACK_B_TITLE'"
+    fi
     observe "S5: do you hear $TRACK_B_NAME? (y = yes, n = nothing, a = $TRACK_A_NAME came back, other)"
     # S5a: after a Sonos-app pause, loading a new track in LMS must start it by
     # itself. Decide from the data (speaker PLAYING, on the bridge's newest
@@ -419,7 +494,7 @@ scenario_5() {
     st=$(sonos_state)
     if [[ $st == PLAYING ]] && speaker_on_current_song; then
         auto=1
-    elif [[ -z $st ]]; then
+    elif [[ -z $st && $AUTO != 1 ]]; then
         local playing
         say ""
         read -r -p "??? S5: is the speaker playing right now? (y/n) " playing || true
@@ -525,6 +600,56 @@ resolve_lms_host() {
     return 0
 }
 
+# AUTO failures accumulate; recovery can never erase a failed check.
+auto_fail() { AUTO_REASONS+=("$*"); }
+auto_progress() {
+    local result
+    if result=$(python3 "$AUTO_HELPER" progress --host "$COORDINATOR_IP" --lms "$LMS" --port "$CLI_PORT" --player "$PLAYER" 2>&1); then
+        mark "AUTO $result"
+    else
+        auto_fail "$result"
+    fi
+}
+auto_begin() {
+    AUTO_REASONS=()
+    AUTO_SINCE=$(date '+%Y-%m-%d %H:%M:%S.%6N')
+    AUTO_STATUS_FILE="$OUT/auto-status-$1.log"
+    python3 "$AUTO_HELPER" monitor --host "$COORDINATOR_IP" > "$AUTO_STATUS_FILE" 2>&1 &
+    AUTO_MONITOR_PID=$!
+}
+auto_end() {
+    local errors
+    # A final synchronous sample ensures even a short scenario has status evidence.
+    if ! errors=$(python3 "$AUTO_HELPER" state --host "$COORDINATOR_IP" 2>&1); then
+        auto_fail "final transport read: $errors"
+    fi
+    kill "$AUTO_MONITOR_PID" 2>/dev/null; wait "$AUTO_MONITOR_PID" 2>/dev/null
+    AUTO_MONITOR_PID=''
+    if [[ -s $AUTO_STATUS_FILE ]]; then auto_fail "$(cat "$AUTO_STATUS_FILE")"; fi
+    if errors=$(journalctl -u "$UNIT" --since "$AUTO_SINCE" -o cat --no-pager 2>&1); then
+        errors=$(printf '%s\n' "$errors" | grep -E 'ERROR_[A-Z_]+' || true)
+        [[ -z $errors ]] || auto_fail "$errors"
+    else
+        auto_fail "scenario journal unavailable: $errors"
+    fi
+    auto_record "$1"
+}
+auto_record() {
+    local reason
+    if (( ${#AUTO_REASONS[@]} )); then
+        reason=$(IFS=';'; printf '%s' "${AUTO_REASONS[*]}")
+        reason=${reason//$'\n'/; }
+        SUMMARY+=("S$1 | FAIL | $reason")
+        AUTO_FAILED=1
+    else
+        SUMMARY+=("S$1 | PASS | progress, position/song and transport checks passed")
+    fi
+}
+auto_summary() {
+    printf 'scenario | PASS/FAIL | reason\n'
+    printf '%s\n' "${SUMMARY[@]}"
+}
+
 # ------------------------------------------------------------------ main ---
 
 [[ $EUID -eq 0 ]] || fail "run as root (tcpdump and journal access)"
@@ -550,9 +675,18 @@ TRACK_B_NAME=$(cat "$OUT/.name_$TRACK_B_ID" 2>/dev/null || echo "track B")
 rm -f "$OUT"/.name_*
 say "Output: $OUT"
 say ""
+if [[ $AUTO != 1 ]]; then
 say "Scenarios $SCENARIOS. Keep the Sonos app open on room $ROOM."
 say "When asked, do the action first, then press Enter immediately."
 read -r -p "Press Enter to start " _ || true
+else
+    have python3 || fail "AUTO requires python3"
+    [[ -n ${SCENARIOS// /} && $S2_ROUNDS =~ ^[1-9][0-9]*$ && $LONG_PAUSE =~ ^[0-9]+$ ]] || fail "AUTO needs scenarios, positive S2_ROUNDS and nonnegative LONG_PAUSE"
+    COORDINATOR_IP=$(./sonos-lms --list-rooms --details | python3 "$AUTO_HELPER" coordinator --room "$ROOM") || fail "AUTO coordinator discovery failed"
+    TRACK_B_TITLE=$(field "$(cli_raw "songinfo 0 100 track_id:$TRACK_B_ID")" title)
+    [[ -n $TRACK_B_TITLE ]] || fail "AUTO could not resolve track B title"
+    mark "AUTO coordinator $COORDINATOR_IP; scenarios $SCENARIOS"
+fi
 
 trap finish EXIT
 trap 'exit 130' INT TERM
@@ -561,8 +695,15 @@ mark "RUN START room=$ROOM player=$PLAYER track_a=$TRACK_A_ID track_b=$TRACK_B_I
 snapshot
 
 for s in $SCENARIOS; do
-    if declare -F "scenario_$s" >/dev/null; then "scenario_$s"; else say "unknown scenario $s"; fi
+    if [[ $AUTO == 1 ]]; then auto_begin "$s"; fi
+    if declare -F "scenario_$s" >/dev/null; then "scenario_$s"; else
+        say "unknown scenario $s"
+        [[ $AUTO != 1 ]] || auto_fail "unknown scenario $s"
+    fi
+    if [[ $AUTO == 1 ]]; then auto_end "$s"; fi
 done
 
 mark "RUN END (LMS pause)"
 lms pause 1
+
+if [[ $AUTO == 1 ]]; then auto_summary > "$OUT/auto-summary.txt"; exit "$AUTO_FAILED"; fi

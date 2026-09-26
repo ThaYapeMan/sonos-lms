@@ -75,6 +75,7 @@ TransportInfo NosonSpeakerControl::transportInfo() {
     const auto transport = impl->player->GetTransportProperty();
     info.available = true; info.state = transport.TransportState; info.status = transport.TransportStatus;
     info.duration = transport.CurrentTrackDuration;
+    info.uri = transport.AVTransportURI; info.uriKnown = true;
     if (transport.CurrentTrackMetaData) {
         info.title = transport.CurrentTrackMetaData->GetValue("dc:title");
         info.album = transport.CurrentTrackMetaData->GetValue("upnp:album");

@@ -103,6 +103,7 @@ class Speaker(BaseHTTPRequestHandler):
 
 def run(mode, command, golden=None):
     server = ThreadingHTTPServer(('127.0.0.1', 0), Speaker)
+    server.current_uri = ''  # GetMediaInfo can precede the first SetAVTransportURI.
     server.mode, server.counts, server.requests, server.errors, server.golden = mode, {}, [], [], golden or {}
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
@@ -150,7 +151,7 @@ with tempfile.TemporaryDirectory(prefix='sonos-play-timeout-') as temp:
     subprocess.run(['g++', '-O2', '-Wall', '-Wextra', '-I', str(ROOT), '-I', str(temp),
                     str(ROOT / 'tests/play_timeout_fixture.cpp'),
                     *[str(ROOT / ('upnp/' + name + '.cpp')) for name in ('own_speaker_control', 'xml', 'soap', 'http', 'discovery')],
-                    '-lpthread', '-o', str(executable)], check=True)
+                    '-lpthread', '-lcrypto', '-o', str(executable)], check=True)
     for mode in ('delayed-play', 'timeout-playing'):
         tested = run(mode, [str(executable)])
         assert tested.counts['Play'] == tested.counts['SetAVTransportURI'] == 1
@@ -170,7 +171,7 @@ with tempfile.TemporaryDirectory(prefix='sonos-own-poll-') as temp:
     subprocess.run(['g++', '-O2', '-Wall', '-Wextra', '-I', str(ROOT), '-I', str(temp),
                     str(ROOT / 'tests/own_poll_fixture.cpp'), str(ROOT / 'sonos-status.cpp'),
                     *[str(ROOT / ('upnp/' + name + '.cpp')) for name in ('own_speaker_control', 'xml', 'soap', 'http', 'discovery')],
-                    '-lpthread', '-o', str(executable)], check=True)
+                    '-lpthread', '-lcrypto', '-o', str(executable)], check=True)
     run('poll', [str(executable)])
     settings = temp / 'settings.cpp'
     settings.write_text('''#include "upnp/backend.h"
