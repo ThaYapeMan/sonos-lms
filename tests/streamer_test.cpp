@@ -78,7 +78,7 @@ class Socket : public TcpSocket {
 public:
     explicit Socket(unsigned id, bool probe = false, bool stayOpen = false, const char* method = "GET", const std::string& session = streamSessionToken()) : probe(probe), stayOpen(stayOpen) {
         input = std::string(method) + " /music/squeezebox.flac?stream=" + std::to_string(id)
-            + (session.empty() ? "" : "&session=" + session) + " HTTP/1.1\r\nHost: bridge\r\n\r\n";
+            + (session.empty() ? "" : "&session=" + session) + " HTTP/1.1\r\nHost: bridge\r\nUser-Agent: Sonos fixture\r\nX-Sonos-Test: probe\r\n\r\n";
     }
     size_t ReceiveData(void* buf, size_t n) override {
         n = std::min(n, input.size() - offset);
@@ -160,6 +160,7 @@ static void serve(SBStreamer& broker, Socket& socket) {
     WSRequestBroker request(&socket, /*secure=*/false, /*timeout ms=*/1000);
     assert(request.IsParsed());
     auto handle = upnp::nosonRequest(request);
+    assert(upnp::streamHeaderLog(handle->headers()) == "User-Agent=Sonos fixture; X-Sonos-Test=probe");
     assert(broker.HandleRequest(handle.get()));
 }
 static void feed(int first, uint64_t firstFrame = 0) {

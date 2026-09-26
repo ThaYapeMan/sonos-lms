@@ -34,7 +34,7 @@ public:
     bool IsAborted() const { return aborted.load(); }
 private:
     std::atomic<bool> aborted{false};
-    void streamSqueezeBox(upnp::StreamRequest* handle, int stream);
+    void streamSqueezeBox(upnp::StreamRequest* handle, int stream, unsigned long long requestId);
 };
 } // namespace bridge
 #endif

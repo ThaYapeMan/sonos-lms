@@ -1,4 +1,5 @@
 #include "upnp/xml.h"
+#include "upnp/stream_server.h"
 #include "upnp/soap.h"
 #include "upnp/discovery.h"
 #include <cassert>
@@ -8,6 +9,15 @@
 using namespace upnp;
 std::string file(const char* name) { std::ifstream in(name); assert(in); std::ostringstream out; out << in.rdbuf(); return out.str(); }
 int main() {
+    assert(streamHeaderLog({{"User-Agent", "Sonos"}, {"Range", "bytes=0-"},
+        {"Icy-MetaData", "1"}, {"Connection", "close"}, {"x-Test", "a"},
+        {"Some-SoNoS-Field", "b"}, {"Host", "ignored"}}) ==
+        "User-Agent=Sonos; Range=bytes=0-; Icy-MetaData=1; Connection=close; x-Test=a; Some-SoNoS-Field=b");
+    assert(streamHeaderLog({{"X-Long", std::string(100, 'x')}}) == "X-Long=" + std::string(80, 'x'));
+    assert(streamHeaderLog({{"X-Test", "a\r\nb"}}) == "X-Test=a??b");
+    assert(streamHeaderLog({{"Accept", "ignored"}}) == "(none)");
+    std::cout << "PASS: stream GET header diagnostics select names case-insensitively, truncate at 80 and stay on one line\n";
+
     const std::string special = "&<>\"' café";
     assert(xmlEscape(special) == "&amp;&lt;&gt;&quot;' café");
     std::string decoded;

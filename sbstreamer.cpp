@@ -236,6 +236,12 @@ bool SBStreamer::HandleRequest(upnp::StreamRequest* handle)
 
     const auto method = handle->method();
     if (method != upnp::StreamRequest::Method::Get && method != upnp::StreamRequest::Method::Head) return false;
+    unsigned long long requestId = 0;
+    if (method == upnp::StreamRequest::Method::Get) {
+        { std::lock_guard<std::mutex> lock(g_enc_mutex); requestId = ++nextRequestId; }
+        printf("stream %d: GET #%llu headers: %s\n", atoi(handle->parameter("stream").c_str()), requestId,
+            upnp::streamHeaderLog(handle->headers()).c_str());
+    }
     const std::string session = handle->parameter("session");
     if (session != streamSessionToken()) {
         printf("stale request: session %s != %s\n", session.c_str(), streamSessionToken().c_str());
@@ -248,7 +254,7 @@ bool SBStreamer::HandleRequest(upnp::StreamRequest* handle)
     switch (method) {
     case upnp::StreamRequest::Method::Get: {
         int stream = atoi(handle->parameter("stream").c_str());
-        streamSqueezeBox(handle, stream);
+        streamSqueezeBox(handle, stream, requestId);
         return true;
     }
     case upnp::StreamRequest::Method::Head: {
@@ -260,7 +266,7 @@ bool SBStreamer::HandleRequest(upnp::StreamRequest* handle)
     }
 }
 
-void SBStreamer::streamSqueezeBox(upnp::StreamRequest* handle, int stream)
+void SBStreamer::streamSqueezeBox(upnp::StreamRequest* handle, int stream, unsigned long long requestId)
 {
     printf("Sonos requested stream %d\n", stream);
     // Bound a stalled peer as well as a stalled PCM producer. noson SendData
@@ -271,7 +277,7 @@ void SBStreamer::streamSqueezeBox(upnp::StreamRequest* handle, int stream)
     auto request = std::make_shared<StreamRequest>();
     {
         std::lock_guard<std::mutex> lock(g_enc_mutex);
-        request->id = ++nextRequestId;
+        request->id = requestId;
         request->stream = stream;
     }
     unsigned current = get_squeezebox_stream_id();

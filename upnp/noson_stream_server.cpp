@@ -32,6 +32,13 @@ public:
                 return urldecode(p.substr(name.size() + 1));
         return {};
     }
+    RequestHeaders headers() const override {
+        RequestHeaders result;
+        for (auto header : broker.GetRequestHeaders())
+            for (auto value = header.second.cbegin(); value != header.second.cend(); ++value)
+                result.emplace_back(header.second.Name(), *value);
+        return result;
+    }
     bool send(const char* data, size_t size) override { return broker.ReplyData(data, size); }
     bool peerClosed() override {
         auto socket = broker.Socket();
