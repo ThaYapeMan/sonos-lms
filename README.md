@@ -53,6 +53,56 @@ a corrected figure back into the same counter LMS reads for its progress bar and
 `ms_played` calculation, so the displayed position tracks what you actually hear
 rather than what has merely been decoded.
 
+## Why a continuous stream, and how this differs from track-by-track UPnP
+
+There are two basic ways to make LMS music come out of a Sonos speaker. Both use
+UPnP to control the speaker -- the difference is **who produces the audio and who
+is in charge of the playlist**.
+
+**Track-by-track (the usual UPnP renderer approach).** The Sonos is handed one
+track at a time -- either as a file URL or as a queue of tracks -- and plays each
+one itself. This is how a Sonos plays its own music library, and how most
+UPnP/DLNA bridges work by default.
+
+**Continuous stream (this project).** The Sonos is handed a single, never-ending
+FLAC stream, the way it would play an internet radio station. The audio is
+produced by squeezelite under full LMS control: LMS decides what plays, when, and
+how it sounds; the Sonos simply renders what it receives.
+
+The trade-off, honestly:
+
+| Continuous stream (sonos-lms) | Track-by-track UPnP |
+|---|---|
+| ✔ LMS processes everything: ReplayGain, crossfade, DSP | ✘ Needs workarounds -- the Sonos plays the original file |
+| ✔ Synchronises with every other LMS player | ✘ LMS sync groups need a shared stream |
+| ✔ Lossless FLAC, including internet radio and streaming services in LMS | ✔ Lossless for local files; radio/services need separate handling |
+| ✔ Pause/resume from LMS or the Sonos app without errors (see [Pause and resume on Sonos](#pause-and-resume-on-sonos)) | ✔ Native Sonos pause |
+| ✘ No Next/Previous button in the Sonos app *(under investigation)* | ✔ Next/Previous in the Sonos app |
+| ✘ Track title in the Sonos app does not change during an album *(work in progress)* | ✔ Correct title per track |
+| ✘ Seeking only from LMS *(under investigation)* | ✔ Seeking in the Sonos app too |
+
+**In short:** a track-by-track approach mainly improves things *in the Sonos
+app*. If you control playback from LMS -- Material Skin, the web interface,
+iPeng -- what you gain is limited, and what you give up (LMS sound processing and
+synchronisation) is real. sonos-lms deliberately chooses the continuous stream and
+treats the Sonos as a real LMS player.
+
+The three ✘ points share one root cause: Sonos treats the stream as internet
+radio, and radio has no next track, no seek bar, and only updates its title via
+ICY metadata, which Sonos requests for MP3/AAC but never for FLAC (see
+[Where it falls short](#where-it-falls-short)). Status:
+
+- **Track titles -- work in progress.** Solvable within stream mode, as options:
+  start a new stream at each track change (correct titles, but a short gap between
+  tracks -- not for gapless albums or DJ mixes), or a lossy MP3/AAC stream that
+  carries ICY titles.
+- **Next/Previous and seeking in the Sonos app -- under investigation.** Not
+  possible while the Sonos sees a radio stream. The idea being explored: give the
+  Sonos one item per track that still points to this bridge, so LMS keeps producing
+  the audio (with all its processing) while the Sonos app gains Next, Previous and a
+  seek bar. Whether Sonos accepts this without new pause or gapless problems still
+  has to be proven on real speakers.
+
 ## Source layout
 
 | Path | What lives there |
@@ -377,10 +427,14 @@ library service or external-playback ownership policy is enabled by this switch.
 
 ## Related
 
-[philippe44/LMS-uPnP](https://github.com/philippe44/LMS-uPnP) takes the opposite
-approach -- driving Sonos purely over UPnP rather than making it look like a
-squeezelite client -- and is worth a look if this project's constraints don't fit
-your setup.
+[philippe44/LMS-uPnP](https://github.com/philippe44/LMS-uPnP) (UPnPBridge) is the
+mature, general-purpose bridge between LMS and UPnP/DLNA renderers, Sonos being
+one of many. It offers both a per-track mode and a continuous "flow" mode; in flow
+mode it can show changing titles only with MP3/AAC, because that is the only case
+in which Sonos accepts ICY metadata. sonos-lms is Sonos-only by design: always
+lossless FLAC, error-free pause/resume from LMS and the Sonos app, Sonos-app
+pause/play relayed back to LMS, and a per-room installer. If you need non-Sonos
+UPnP renderers or Next/Previous in the Sonos app today, LMS-uPnP is worth a look.
 
 ## License
 
