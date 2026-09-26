@@ -117,12 +117,35 @@ at a 500 ms interval. The resulting snapshot feeds the same refreshStatus,
 ObserveDeviceTransport and ResumeSqueezeBox functions as GENA in noson mode.
 HTTP workers only read the snapshot; they never poll or hold a SOAP I/O lock.
 The usual detection delay is up to 500 ms plus network/loop work, unlike immediate
-GENA notifications. A slow control, position or topology call can extend the delay;
-each HTTP SOAP exchange has one five-second deadline including connect/send/read.
+GENA notifications. A slow control, position or topology call can extend the delay.
+Each SOAP exchange has one deadline including connect/send/read:
+
+| Action | Deadline |
+| --- | --- |
+| Play, SetAVTransportURI, Stop, Pause | 20 seconds |
+| GetTransportInfo, GetPositionInfo, GetMediaInfo, GetVolume, GetZoneGroupState and other reads | 5 seconds |
+
+Noson's socket timeout is 5 seconds with three read attempts (up to about 15 seconds
+without incoming data): `noson/noson/src/private/socket.h:33–35`,
+`socket.cpp:103`, `socket.cpp:428–465`. Its timeout is per socket wait, not a single
+HTTP exchange deadline. The 20-second transport deadline allows the Sonos standby
+GET probe to finish before acknowledging Play.
+
 Position uses a one-second cache. Failed polls mark transport unavailable instead
-of inventing STOPPED or replaying a stale transition. Own mode has no volume or
-track-metadata subscription, so the legacy status table's optional display fields
-are empty/zero; this does not affect transport control or stream metadata.
+of inventing STOPPED or replaying a stale transition. Own polling fills title from
+TrackMetaData (falling back to the sent DIDL title),
+track duration from GetPositionInfo, and volume from RenderingControl GetVolume
+(InstanceID 0, Channel Master, `/MediaRenderer/RenderingControl/Control`). Volume
+is cached for at least one second; display reads never send SOAP.
+
+Before retrying PlayStream, both backends freshly query GetTransportInfo and
+GetMediaInfo. PLAYING/TRANSITIONING on the exact current session-and-stream URL
+completes the start without sending SetAVTransportURI/Play again. Unknown state,
+failed reads, STOPPED, or another URL retain the bounded three-attempt retry.
+
+EPIPE/ECONNRESET within two seconds of a pause/stop observation, response end, or
+standby promotion is logged as a normal client close. Other errors or later closes
+retain the send-failure diagnostic.
 
 All seven AVTransport actions use `/MediaRenderer/AVTransport/Control`, InstanceID
 0 and the service namespace `urn:schemas-upnp-org:service:AVTransport:1`.

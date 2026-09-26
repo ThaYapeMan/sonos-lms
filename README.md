@@ -141,13 +141,13 @@ Example re-run after a new build and discovery of MBR:
 
 ```text
 sonos-lms installer — build abc1234
-LMS server: 192.168.178.23 (config)
-LMS server [192.168.178.23]:
+LMS server: 192.0.2.23 (config)
+LMS server [192.0.2.23]:
 Sonos rooms found: 3
-Room        Model   IP              Group                          Bridge
-MBR         One     192.168.178.24  -                              new
-Sonos Port  Port    192.168.178.25  member of Study                yes, running
-Study       Play:1  192.168.178.26  coordinator: Study+Sonos Port  yes, running
+Room        Model   IP          Group                          Bridge
+MBR         One     192.0.2.24  -                              new
+Sonos Port  Port    192.0.2.25  member of Study                yes, running
+Study       Play:1  192.0.2.26  coordinator: Study+Sonos Port  yes, running
 Activate Sonos room "MBR"? [y/N] y
 Change other rooms? [y/N]
 Config:
@@ -196,7 +196,7 @@ accept the defaults). Example config:
 
 ```ini
 # LMS host or IP (no port). Empty = automatic discovery on the local network.
-LMS_SERVER=192.168.178.23
+LMS_SERVER=192.0.2.23
 # Sonos rooms found on the network.
 # yes = bridge this room to LMS, no = ignore it.
 room.Sonos Port=yes
