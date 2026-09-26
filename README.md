@@ -91,6 +91,7 @@ sonos-lms --room="Living Room" [--ip=<sonos-ip>] [--server=<lms-host>]
 
 | Flag | Meaning |
 | --- | --- |
+| `--list-rooms --details` | Sorted tab-separated name, model, IP, coordinator and comma-separated members (coordinator first); `-` means unknown. Uses the room’s primary device for bonded speakers. |
 | `--find-server` | Discover LMS; print only its host/IP and exit 0, or print nothing and exit non-zero. |
 | `--list-rooms` | Print sorted, unique room names, including group members, then exit. Uses `SONOS_LMS_UPNP` and honours `--ip`. |
 | `--room=<name>` | Required except with `--list-rooms` or `--find-server`. The Sonos room/zone to take over. |
@@ -125,60 +126,101 @@ Taking over "Living Room" (MAC 34:7E:5C:1A:90:20) ... connected to LMS
 
 ### Installing room services
 
-From the deployment checkout at `/opt/sonos-lms` (root and Python 3 required), run
-`make` then `sudo make install`. On a terminal, the installer asks for the LMS
-server and every discovered room, then shows the changes for approval. Enter keeps
-the displayed default; Ctrl-C or answering `n` at Apply leaves files and services
-untouched. An example session:
+From `/opt/sonos-lms`, run `make` then `sudo make install` (root and Python 3
+required). The installer shows its build, the LMS host and its source, then a room
+table with model, IP, group and bridge state. It warns if LMS discovery differs
+from the saved host. An empty `LMS_SERVER` uses discovery; a missing line is added
+with the discovered host or an empty value.
+
+On the first install, it asks about every discovered room. Later runs ask only
+about new rooms, then offer to change the others. With no new rooms, one selection
+question lets you keep the existing choices. Offline rooms retain their config
+lines and appear as offline. Room arguments are enabled without per-room questions.
+
+Example re-run after a new build and discovery of MBR:
 
 ```text
-LMS server [lms.example]:
-Activate Sonos room "Kitchen"? [y/N] n
-Activate Sonos room "Sonos Port"? [y/N] y
-Activate Sonos room "Study"? [y/N] y
-Proposed changes:
-... config diff ...
+sonos-lms installer — build abc1234
+LMS server: 192.168.178.23 (config)
+LMS server [192.168.178.23]:
+Sonos rooms found: 3
+Room        Model   IP              Group                          Bridge
+MBR         One     192.168.178.24  -                              new
+Sonos Port  Port    192.168.178.25  member of Study                yes, running
+Study       Play:1  192.168.178.26  coordinator: Study+Sonos Port  yes, running
+Activate Sonos room "MBR"? [y/N] y
+Change other rooms? [y/N]
+Config:
+--- current config
++++ proposed config
+@@ -4,2 +4,3 @@
+ room.Sonos Port=yes
+ room.Study=yes
++room.MBR=yes
+Start:   MBR
+Restart: Sonos Port, Study (new build abc1234); playback stops briefly
+Build record: update installed-build
 Apply? [Y/n]
+Sonos Port  running   LMS player "Sonos Port (Sonos)" connected
+Study       running   LMS player "Study (Sonos)" connected
+MBR         running   LMS player "MBR (Sonos)" connected
+Logs: journalctl -u 'sonos-lms@*' -f
 ```
 
-Resulting `/etc/sonos-lms/config`:
+With the same build and settings, the plan instead includes:
+
+```text
+Change which rooms are bridged? [y/N]
+Config:  no changes
+Keep:    Sonos Port, Study, MBR
+Nothing to do.
+```
+
+Kept rooms are **not restarted**. Running rooms restart only for a changed or
+missing build record, an LMS setting changed in this run, or `--restart`.
+`/etc/sonos-lms/installed-build` records the commit (with `-dirty` when applicable)
+and binary SHA-256; it is written atomically only after service actions succeed.
+The plan lists Start, Restart (with its reason), Stop and Keep, plus any service
+enabling, template installation, migration or build-record changes. With no work,
+there is no Apply prompt. Declining Apply or pressing Ctrl-C at a prompt changes
+no files or services.
+
+Afterward, enabled rooms (including kept rooms) share an LMS CLI check on port
+9090, waiting at most 15 seconds for `<room> (Sonos)` with `connected:1`.
+A missing host or unreachable CLI skips the check without failing installation;
+a running service alone does not prove it reached LMS.
+
+Alternatively, edit `/etc/sonos-lms/config` and run
+`sudo scripts/install-devices.sh --non-interactive` (or `sudo make install` and
+accept the defaults). Example config:
 
 ```ini
 # LMS host or IP (no port). Empty = automatic discovery on the local network.
-LMS_SERVER=lms.example
+LMS_SERVER=192.168.178.23
 # Sonos rooms found on the network.
 # yes = bridge this room to LMS, no = ignore it.
-room.Kitchen=no
 room.Sonos Port=yes
 room.Study=yes
+room.MBR=yes
 ```
 
-If `LMS_SERVER` is missing, the installer discovers and records the host, or writes
-an empty value when no server answers. Existing values are kept unless you answer
-the LMS prompt or pass `--server=<host>`. Hosts must have no port, whitespace or
-control characters.
+Set a room to `no` and apply to stop/disable its bridge. Existing comments, ordering
+and unrelated settings are preserved. The old `rooms` file migrates once to
+`room.<name>=yes` settings and is renamed `rooms.migrated` after approval.
 
-Alternatively, edit the config with `sudoedit /etc/sonos-lms/config`, then run
-`sudo make install` and accept its defaults, or apply without prompts using
-`sudo scripts/install-devices.sh --non-interactive`. Set a room to `yes` to
-start/enable it (restart if already running), or `no` to stop/disable it.
-Offline rooms retain their lines and are reported without questions. If discovery
-fails, configured rooms are still applied. The old `rooms` file migrates once to
-enabled settings and is renamed `rooms.migrated` after approval.
-
-Installer flags (for `scripts/install-devices.sh`):
+Installer flags (`scripts/install-devices.sh`):
 
 | Option | Behaviour |
 | --- | --- |
-| `--yes` | Apply without prompts; keep existing room values and add new rooms as `no`. |
-| `--non-interactive` | Same as `--yes`; also automatic when stdin or stdout is not a TTY. |
-| `--reconfigure` | Explicit alias for the normal interactive flow: ask about every discovered room, even when nothing is new. Requires a TTY; non-interactive flags take precedence. |
-| `--server=<host>` | Override the saved LMS server. |
+| `--yes` | Apply the displayed plan without prompts; new rooms default to `no`, existing values stay unchanged. |
+| `--non-interactive` | Same as `--yes`; automatic when stdin or stdout is not a TTY. |
+| `--reconfigure` | Ask about every discovered room on a TTY. Non-interactive flags take precedence. |
+| `--restart` | Force restart of every running enabled room; plan reason is `forced`. Stopped enabled rooms are started. |
+| `--server=<host>` | Override the saved LMS host (no port, whitespace or control characters). |
 
-Quoted room arguments, such as `sudo scripts/install-devices.sh "Sonos Port"`,
-set those rooms to `yes` without asking about them. Comments, ordering, unrelated
-settings and offline room lines are preserved. Automated `make install` with no
-TTY never prompts; new speakers default to `no`.
+Quoted room arguments such as `sudo scripts/install-devices.sh "Sonos Port"`
+set those rooms to `yes`. Interactive declines produce no new-room reminder;
+non-interactive runs print one combined reminder for newly added disabled rooms.
 
 ## Testing
 
