@@ -68,7 +68,7 @@ try:
                  'UUID="DUPLICATE" ZoneName="Study" Location="http://127.0.0.8:1400/xml/device_description.xml"/>'
                  '</ZoneGroup>')
     topology = topology.replace('</ZoneGroups>', duplicate + '</ZoneGroups>')
-    for backend in ('own', 'noson', None):
+    for backend in ('yeney', 'own', 'noson', None):
         for empty in (False, True):
             server.topology = '<ZoneGroupState><ZoneGroups/></ZoneGroupState>' if empty else topology
             server.actions = []
@@ -80,7 +80,8 @@ try:
             assert result.returncode == (2 if empty else 0), result
             assert result.stdout == ('' if empty else 'Living & Dining\nSonos Port\nStudy\n'), result
             if empty: assert 'No Sonos rooms found.' in result.stderr, result
-            assert f'UPnP layer: {backend or "noson"}' in result.stderr
+            expected_backend = 'yeney (alias own)' if backend == 'own' else backend or 'noson'
+            assert f'UPnP layer: {expected_backend}\n' in result.stderr
             assert 'Stream session:' not in result.stderr and 'SONOS_LMS_PAUSE=' not in result.stderr
             assert 'GetZoneGroupState' in server.actions, server.actions
             assert set(server.actions) <= {'GetZoneGroupState', 'GetHouseholdID', 'GetZoneInfo', 'ListAvailableServices'}, server.actions
@@ -92,7 +93,7 @@ try:
     expected = ('Living & Dining\t-\t127.0.0.8\tLiving & Dining\tLiving & Dining\n'
                 'Sonos Port\tPort\t127.0.0.8\tStudy\tStudy,Sonos Port\n'
                 'Study\tPlay:1\t127.0.0.8\tStudy\tStudy,Sonos Port\n')
-    for backend in ('own', 'noson'):
+    for backend in ('yeney', 'own', 'noson'):
         server.topology = topology
         result = subprocess.run([str(ROOT / 'sonos-lms'), '--list-rooms', '--details', '--ip=127.0.0.8'],
                                 env=dict(os.environ, SONOS_LMS_UPNP=backend), capture_output=True, text=True, timeout=30)

@@ -1,5 +1,6 @@
-# The UPnP layer
+# yeney — the UPnP layer
 
+yeney is our own UPnP discovery and SOAP control layer, gradually replacing noson.
 Phase 1 keeps noson as the default. The bridge talks to `upnp::SpeakerControl`
 and `upnp::StreamServer`; the noson adapters contain the discovery/control and
 HTTP implementation. HTTP handlers receive `upnp::StreamRequest`, never a noson
@@ -95,10 +96,13 @@ Display volume is a separate interface call because noson GetVolume performs SOA
 It must never be called by the cached transport read on an HTTP worker.
 
 
-## Own backend (experimental)
+## yeney backend (experimental)
 
-`SONOS_LMS_UPNP` is read and logged once at startup. Unset means noson; invalid
-values warn and select noson. `OwnSpeakerControl` has no noson includes or calls.
+`SONOS_LMS_UPNP=yeney` selects yeney; `SONOS_LMS_UPNP=own` is a permanent alias.
+`SONOS_LMS_UPNP=noson` explicitly selects the default. The setting is read and
+logged once at startup. Unset means noson; empty or invalid values warn and
+select noson. Startup logs `UPnP layer: yeney`, adding ` (alias own)` when the
+alias was used. `OwnSpeakerControl` has no noson includes or calls.
 It sends SSDP M-SEARCH to 239.255.255.250:1900 with the ZonePlayer:1 ST, waits
 three seconds and retries once if no valid replies arrive. `--ip` bypasses SSDP.
 It obtains ZoneGroupState via `/ZoneGroupTopology/Control`, then matches an exact,
@@ -112,7 +116,7 @@ the status loop; unavailable/malformed topology keeps the last good snapshot.
 `controllerUri()` combines getsockname on the socket connected to the selected
 speaker with the actual port of NosonStreamServer, including listener port fallback.
 
-Own transport state is polled by Status::update on the existing main status loop
+yeney transport state is polled by Status::update on the existing main status loop
 at a 500 ms interval. The resulting snapshot feeds the same refreshStatus,
 ObserveDeviceTransport and ResumeSqueezeBox functions as GENA in noson mode.
 HTTP workers only read the snapshot; they never poll or hold a SOAP I/O lock.
@@ -132,7 +136,7 @@ HTTP exchange deadline. The 20-second transport deadline allows the Sonos standb
 GET probe to finish before acknowledging Play.
 
 Position uses a one-second cache. Failed polls mark transport unavailable instead
-of inventing STOPPED or replaying a stale transition. Own polling fills title from
+of inventing STOPPED or replaying a stale transition. yeney polling fills title from
 TrackMetaData (falling back to the sent DIDL title when empty or equal to the
 stream URL or its basename, with or without the query),
 track duration from GetPositionInfo, and volume from RenderingControl GetVolume
@@ -149,7 +153,7 @@ GetMediaInfo. PLAYING/TRANSITIONING on the exact current session-and-stream URL
 completes the start without sending SetAVTransportURI/Play again. Unknown state,
 failed reads, STOPPED, or another URL retain the bounded three-attempt retry.
 
-In own mode, EPIPE/ECONNRESET classification waits up to two seconds on a separate
+In yeney mode, EPIPE/ECONNRESET classification waits up to two seconds on a separate
 logging worker. A pause/stop observation, response end or standby promotion for
 the same stream within two seconds before or after the error makes it a normal
 client close. Otherwise the original send-failure diagnostic is emitted, exactly
@@ -172,10 +176,10 @@ These helpers contain no bridge state and implement no SMAPI functionality.
 
 `make test` includes XML/SSDP/topology tests and a loopback mock HTTP speaker.
 The mock captures all seven requests from the actual linked noson AVTransport
-client and compares own requests byte-for-byte (including the legacy Speed=1 on
+client and compares yeney requests byte-for-byte (including the legacy Speed=1 on
 Pause/Stop). It also verifies the committed SetAVTransportURI fixture, CurrentURI,
 SOAP faults, chunked/truncated responses, deadlines, cached nonblocking reads,
-group-change logging, and real own polling feeding the extracted production
+group-change logging, and real yeney polling feeding the extracted production
 ObserveDeviceTransport/ResumeSqueezeBox code. Physical S1–S7 testing remains a
 separate release gate, performed by the user; no deployment is part of these tests.
 
@@ -189,5 +193,5 @@ to `/AlarmClock/Event` and `/MediaServer/ContentDirectory/Event`. Player::Init
 (`sonosplayer.cpp:114`) opens a TCP connection to select the local interface,
 subscribes each group member's RenderingControl plus coordinator AVTransport and
 ContentDirectory. System's event handler owns subscription renewal and dispatch.
-Those noson-side ancillary services remain in default mode; own mode needs only
+Those noson-side ancillary services remain in default mode; yeney mode needs only
 topology and AVTransport and does not initialize them.

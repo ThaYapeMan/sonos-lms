@@ -406,16 +406,23 @@ simple fix: stop instead of pause.
 
 ## The UPnP layer
 
-`SONOS_LMS_UPNP=noson|own` selects speaker discovery and control, once at startup.
-The default is `noson`. `own` is **experimental in phase 1** and must pass physical
-S1–S7 testing before changing the default. For example:
+### yeney — our own UPnP layer
+
+**yeney** (pronounced **YEN-ee**) is our small UPnP discovery and SOAP control
+layer. Its palindrome name nods to sonos and noson: the “yes” answer to noson.
+It gradually replaces [noson](https://github.com/janbar/noson), the library by
+Jean-Luc Barrière that made this bridge possible.
+
+`SONOS_LMS_UPNP=yeney` selects yeney once at startup. `own` remains a permanent
+alias so existing drop-ins keep working. **noson remains the default until yeney
+has proven itself**; yeney is experimental in phase 1. For example:
 
 ```sh
-SONOS_LMS_UPNP=own ./sonos-lms --room="Sonos Port" --server=192.168.178.10
+SONOS_LMS_UPNP=yeney ./sonos-lms --room="Sonos Port" --server=192.168.178.10
 ```
 
-For a service, set `Environment=SONOS_LMS_UPNP=own` in its systemd override.
-Own mode discovers speakers with SSDP, maps room/group topology, and sends SOAP
+For a service, set `Environment=SONOS_LMS_UPNP=yeney` in its systemd override.
+yeney discovers speakers with SSDP, maps room/group topology, and sends SOAP
 control directly. Transport state is polled every 500 ms instead of using GENA
 events; slow/failed calls can extend that interval. Group changes are logged only:
 this phase does not coordinate grouped-room transport or LMS sync. The HTTP stream,
