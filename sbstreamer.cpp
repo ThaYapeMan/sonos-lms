@@ -15,6 +15,8 @@
 #include "stream_close_log.h"
 
 #include "sbencoder.h"
+#include "audio_mode.h"
+#include <map>
 #include "sonos-position.h"
 
 #include <atomic>
@@ -43,6 +45,14 @@ using namespace bridge;
 // a fresh FLAC encoder in that generation; STANDBY requests have no encoder.
 static std::shared_ptr<SBEncoder> g_enc;
 static std::mutex g_enc_mutex;
+static std::map<unsigned, unsigned> streamRates;
+// Publish the next format before its ID, without holding g_enc_mutex while
+// new_squeezebox_stream_id takes the transport/resume locks.
+extern "C" void set_squeezebox_audio_rate(unsigned stream, unsigned rate) {
+    std::lock_guard<std::mutex> lock(g_enc_mutex);
+    streamRates[stream] = rate;
+    while (streamRates.size() > 2) streamRates.erase(streamRates.begin());
+}
 // Ownership is independent of socket state. All request fields and slots are
 // protected by g_enc_mutex; only ACTIVE requests have an encoder.
 struct StreamRequest {
@@ -69,7 +79,9 @@ static std::vector<std::shared_ptr<StreamRequest>> standbyRequests;
 static void activateRequest(const std::shared_ptr<StreamRequest>& request, bool promoted)
 {
     request->encoder = std::make_shared<SBEncoder>(request->stream);
-    request->opened = request->encoder->open();
+    const auto rate = streamRates.find(request->stream);
+    request->opened = request->encoder->open(audioMode() == AudioMode::Legacy ? 16 : 24,
+        rate == streamRates.end() ? 44100 : rate->second);
     sonos_position_connection(request->stream, request->id);
     activeRequest = request;
     g_enc = request->encoder;

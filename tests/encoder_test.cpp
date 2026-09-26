@@ -6,6 +6,8 @@
 #include <future>
 #include <iostream>
 #include <vector>
+#include <FLAC++/decoder.h>
+extern "C" void pack_audio_test(void*, int32_t*, unsigned, unsigned);
 
 static std::atomic<unsigned> generation(1);
 static std::atomic<bool> paused(false);
@@ -25,10 +27,102 @@ struct EncoderTestAccess {
         encoder.m_pcmBytesAccepted = bytes;
         encoder.m_firstReadAtMs = 1;
     }
+    static std::vector<unsigned char> finish(SBEncoder& encoder) {
+        encoder.close();
+        std::vector<unsigned char> bytes;
+        char buffer[4096];
+        int n;
+        while ((n = encoder.drainEncodedBytes(buffer, sizeof(buffer))) > 0)
+            bytes.insert(bytes.end(), buffer, buffer + n);
+        return bytes;
+    }
     static uint64_t bytes(const SBEncoder& encoder) { return encoder.m_pcmBytesAccepted; }
 };
 }
 
+
+class Decoder : public FLAC::Decoder::Stream {
+public:
+    std::vector<unsigned char> data;
+    std::vector<int32_t> samples;
+    size_t offset = 0;
+    unsigned rate = 0, bits = 0;
+    FLAC__StreamDecoderReadStatus read_callback(FLAC__byte* dst, size_t* n) override {
+        *n = std::min(*n, data.size() - offset);
+        if (!*n) return FLAC__STREAM_DECODER_READ_STATUS_END_OF_STREAM;
+        memcpy(dst, data.data() + offset, *n); offset += *n;
+        return FLAC__STREAM_DECODER_READ_STATUS_CONTINUE;
+    }
+    FLAC__StreamDecoderWriteStatus write_callback(const FLAC__Frame* frame,
+                                                  const FLAC__int32* const pcm[]) override {
+        rate = frame->header.sample_rate; bits = frame->header.bits_per_sample;
+        for (unsigned i = 0; i < frame->header.blocksize; ++i)
+            for (unsigned ch = 0; ch < 2; ++ch) samples.push_back(pcm[ch][i]);
+        return FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE;
+    }
+    void error_callback(FLAC__StreamDecoderErrorStatus) override { assert(false); }
+};
+static void audioQualityTests() {
+    for (unsigned rate : {44100u, 48000u}) for (unsigned bits : {16u, 24u}) {
+        std::vector<int32_t> input, expected;
+        // Full 16-bit range, negative values and zero; left-aligned internal PCM.
+        for (int v = -32768; v <= 32767; ++v) {
+            input.push_back(v * 65536);
+            expected.push_back(v * (bits == 24 ? 256 : 1));
+        }
+        std::vector<char> packed(input.size() * bits / 8);
+        pack_audio_test(packed.data(), input.data(), input.size()/2, bits);
+        bridge::SBEncoder encoder(1);
+        assert(encoder.open(bits, rate));
+        assert(encoder.write(packed.data(), packed.size(), 10) == int(packed.size()));
+        Decoder decoder;
+        decoder.data = bridge::EncoderTestAccess::finish(encoder);
+        assert(decoder.init() == FLAC__STREAM_DECODER_INIT_STATUS_OK);
+        assert(decoder.process_until_end_of_stream());
+        assert(decoder.samples == expected && decoder.rate == rate && decoder.bits == bits);
+        decoder.finish();
+        std::cout << "PASS: decoded " << bits << "-bit FLAC " << rate
+                  << " Hz preserves every 16-bit sample (24-bit padding only)\n";
+        if (bits == 24) {
+            // Every low bit survives too; not just padded 16-bit content.
+            for (size_t i = 0; i < input.size(); ++i) {
+                expected[i] = int(i * 7919 % 16777216) - 8388608;
+                input[i] = expected[i] * 256;
+            }
+            pack_audio_test(packed.data(), input.data(), input.size()/2, bits);
+            bridge::SBEncoder native(1);
+            assert(native.open(bits, rate));
+            assert(native.write(packed.data(), packed.size(), 10) == int(packed.size()));
+            Decoder full;
+            full.data = bridge::EncoderTestAccess::finish(native);
+            assert(full.init() == FLAC__STREAM_DECODER_INIT_STATUS_OK);
+            assert(full.process_until_end_of_stream() && full.samples == expected);
+            full.finish();
+            std::cout << "PASS: native 24-bit precision preserved at " << rate << " Hz\n";
+        }
+        const uint64_t boundary = uint64_t(1) << 32;
+        bridge::SBEncoder paced(1);
+        assert(paced.open(bits, rate));
+        const unsigned frameBytes = bits / 8 * 2;
+        const uint64_t below = boundary / frameBytes * frameBytes;
+        bridge::EncoderTestAccess::seed(paced, below);
+        fakeClock = below / frameBytes * 1000 / rate + 1;
+        unsigned crossingAnchors = 0;
+        assert(paced.write(packed.data(), frameBytes, 10, [&]{++crossingAnchors;}) == int(frameBytes));
+        assert(bridge::EncoderTestAccess::bytes(paced) > boundary && crossingAnchors == 0);
+        const uint64_t bytes = (boundary + 2000) * rate / 1000 * frameBytes;
+        bridge::EncoderTestAccess::seed(paced, bytes);
+        const uint64_t elapsed = bytes / frameBytes * 1000 / rate;
+        fakeClock = elapsed - 1000 + 1;
+        assert(paced.write(packed.data(), frameBytes, 5) == 0);
+        fakeClock = elapsed + 1;
+        unsigned anchors = 0;
+        assert(paced.write(packed.data(), frameBytes, 10, [&]{++anchors;}) == int(frameBytes));
+        assert(anchors == 0 && bridge::EncoderTestAccess::bytes(paced) == bytes + frameBytes);
+        fakeClock = 0;
+        std::cout << "PASS: " << bits << "-bit " << rate << " Hz pacing beyond 2^32 bytes and 49 days\n";
+    }
+}
 static void counterAndShutdownTests() {
     bridge::SBEncoder encoder(1);
     assert(encoder.open());
@@ -70,6 +164,7 @@ static void counterAndShutdownTests() {
 
 int main()
 {
+    audioQualityTests();
     counterAndShutdownTests();
     bridge::SBEncoder old(1);
     char data[16384];

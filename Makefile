@@ -3,7 +3,7 @@ FLAGS_SL = -g -O3 -Wall -fno-common -Isqueezelite -Wno-error=incompatible-pointe
 OWN_UPNP_SOURCES = upnp/xml.cpp upnp/http.cpp upnp/soap.cpp upnp/discovery.cpp upnp/own_speaker_control.cpp
 UPNP_OBJS = $(OWN_UPNP_SOURCES:.cpp=.o) upnp/encoded_buffer.o upnp/noson_stream_server.o upnp/noson_speaker_control.o
 
-OBJS = $(UPNP_OBJS) sonos-lms.o sbstreamer.o sbencoder.o sonos-status.o sonos-position.o
+OBJS = audio_mode.o $(UPNP_OBJS) sonos-lms.o sbstreamer.o sbencoder.o sonos-status.o sonos-position.o
 
 OBJS_SL = squeezelite.o \
 	output_sonos.o \
@@ -43,15 +43,15 @@ sonos-lms: $(OBJS) $(OBJS_SL) noson/noson/libnoson.a
 		-lpthread -lm -lrt -ldl -lasound
 
 clean:
-	rm -f *.o upnp/*.o squeezelite/*.o sonos-lms position-test encoder-test resume-state-test streamer-test upnp-test own-control-test noson-golden
+	rm -f *.o tests/*.o upnp/*.o squeezelite/*.o sonos-lms position-test encoder-test resume-state-test streamer-test upnp-test own-control-test noson-golden
 
 slimproto_sonos.o: slimproto_sonos.c squeezelite/slimproto.c squeezelite/squeezelite.h
 
 .PHONY: test install
 install: sonos-lms
 	scripts/install-devices.sh
-encoder-test: upnp/encoded_buffer.cpp upnp/encoded_buffer.h tests/encoder_test.cpp sbencoder.cpp sbencoder.h noson/noson/libnoson.a
-	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -DSBENCODER_TEST -o $@ tests/encoder_test.cpp sbencoder.cpp upnp/encoded_buffer.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
+encoder-test: tests/audio_pack_fixture.o squeezelite/output_pack.o upnp/encoded_buffer.cpp upnp/encoded_buffer.h tests/encoder_test.cpp sbencoder.cpp sbencoder.h noson/noson/libnoson.a
+	g++ -g -O2 -Wall -I. -Inoson/noson/src -Inoson/noson/public/noson -DSBENCODER_TEST -o $@ tests/encoder_test.cpp tests/audio_pack_fixture.o squeezelite/output_pack.o sbencoder.cpp upnp/encoded_buffer.cpp noson/noson/libnoson.a -lFLAC++ -lFLAC -lcrypto -lssl -lz -lpthread
 
 test: sonos-lms position-test encoder-test resume-state-test streamer-test upnp-test own-control-test noson-golden
 	./upnp-test
@@ -73,6 +73,8 @@ test: sonos-lms position-test encoder-test resume-state-test streamer-test upnp-
 	python3 tests/lms_discovery_test.py
 	python3 tests/device_test_script_test.py
 	python3 tests/pause_mode_test.py
+	python3 tests/audio_mode_test.py
+	python3 tests/audio_output_test.py
 
 sbstreamer.o sbencoder.o: sbencoder.h
 
@@ -117,3 +119,5 @@ sbstreamer.o streamer-test: stream_close_log.h
 
 sonos-lms.o sonos-status.o: sonos-status.h
 sonos-status.o: speaker_uri.h stream_session.h
+
+output_sonos.o slimproto_sonos.o audio_mode.o sonos-lms.o sbstreamer.o streamer-test: audio_mode.h

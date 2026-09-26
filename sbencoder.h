@@ -39,7 +39,7 @@ public:
     ~SBEncoder();
 
     bool open();
-    bool open(uint8_t sampleBits);
+    bool open(uint8_t sampleBits, unsigned sampleRate = 44100);
 
     // Blocks (up to timeout ms, 0 = forever) until len bytes of PCM have
     // been accepted into the encoder, or the stream ends/is cancelled.
@@ -101,6 +101,7 @@ private:
     uint64_t m_pcmBytesAccepted;            // running total handed to the encoder
     int m_bytesPerFrame;
     int m_sampleBits;
+    unsigned m_sampleRate = 44100;
     unsigned m_streamId;
     FLAC__int32* m_interleaveBuf;
 

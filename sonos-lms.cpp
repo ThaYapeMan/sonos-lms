@@ -25,6 +25,7 @@
 #include "sonos-status.h"
 #include "stop_debounce.h"
 #include "stream_session.h"
+#include "audio_mode.h"
 
 extern "C" {
 unsigned get_squeezebox_stream_id(void);
@@ -841,6 +842,7 @@ int main(int argc, char** argv)
         return listRoomsCommand(ip ? ip : "", findFlag(argc, argv, "--debug") ? 4 : 0, findFlag(argc, argv, "--details"));
     }
     (void)pauseMode();
+    (void)audioMode();
     const auto backend = upnp::backend();
     try {
         printf("Stream session: %s\n", streamSessionToken().c_str());

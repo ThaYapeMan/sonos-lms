@@ -3,6 +3,7 @@
 #include "squeezelite/slimproto.c"
 #undef slimproto
 
+#include "audio_mode.h"
 extern void sonos_lms_transport(char command);
 
 /* Two transport state machines (LMS and device), plus independent stream state:
@@ -13,7 +14,8 @@ extern void sonos_lms_transport(char command);
  *   (3) neither -> PlayStream with the same current URL.
  * A GET must never end without audio unless the client closes it.
  * Exception: a held GET with no PCM after five seconds receives HTTP 503.
- * LMS strm s (seek/track change) -> new stream + PlayStream, no Pause/Play.
+ * LMS strm s after stop/seek -> new stream + PlayStream, no Pause/Play.
+ * Modern same-rate playlist continuation retains the current FLAC stream.
  * Silence/pause/resume -> same stream ID, NEVER transport intent from output.
  * Device pause -> LMS pause; device play -> LMS play, current GET -> fresh
  * FLAC connection in the SAME generation. Only older IDs redirect to current.
@@ -29,8 +31,18 @@ static void sonos_process_strm(u8_t *pkt, int len)
 {
     if (len < sizeof(struct strm_packet)) return;
     struct strm_packet *strm = (struct strm_packet *)pkt;
+    // A queued next track must not reset the current stream's PCM anchor or
+    // interrupt its producer. q/s seeks and starts from pause still restart.
+    bool continuous = false;
+    if (strm->command == 's') {
+        LOCK_O;
+        continuous = !sonos_audio_legacy() && output.state == OUTPUT_RUNNING
+            && output.frames_played != 0;
+        UNLOCK_O;
+        sonos_output_new_track(continuous);
+    }
     // Nonzero p is a synchronisation delay, not a user pause.
-    if (strm->command != 'p' || unpackN(&strm->replay_gain) == 0)
+    if (!continuous && (strm->command != 'p' || unpackN(&strm->replay_gain) == 0))
         sonos_lms_transport(strm->command);
     process_strm(pkt, len);
 }

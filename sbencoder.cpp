@@ -24,7 +24,6 @@ namespace {
 constexpr int kSamplesPerChunk = 1024;
 constexpr int kEncodedRingCapacity = 256;
 constexpr int kChannelCount = 2;
-constexpr uint32_t kSampleRateHz = 44100;
 
 // How far, in milliseconds, encoded-but-unsent audio is allowed to run ahead
 // of what Sonos has actually played before write() blocks the decoder. Kept
@@ -103,7 +102,7 @@ bool SBEncoder::open()
     return open(16);
 }
 
-bool SBEncoder::open(uint8_t sampleBits)
+bool SBEncoder::open(uint8_t sampleBits, unsigned sampleRate)
 {
     if (m_phase != Phase::Init) {
         printf("SBEncoder::open(stream=%u) -- already opened\n", m_streamId);
@@ -114,7 +113,8 @@ bool SBEncoder::open(uint8_t sampleBits)
     m_flac->set_compression_level(5);
     m_flac->set_channels(kChannelCount);
     m_flac->set_bits_per_sample(sampleBits);
-    m_flac->set_sample_rate(kSampleRateHz);
+    m_flac->set_sample_rate(sampleRate);
+    m_sampleRate = sampleRate;
 
     m_bytesPerFrame = (sampleBits / 8) * kChannelCount;
     m_sampleBits = sampleBits;
@@ -274,7 +274,7 @@ int SBEncoder::write(const char* data, int len, unsigned timeout, const std::fun
             return 0;
         }
 
-        const uint64_t encodedMs = m_pcmBytesAccepted / m_bytesPerFrame * 1000ULL / kSampleRateHz;
+        const uint64_t encodedMs = m_pcmBytesAccepted / m_bytesPerFrame * 1000ULL / m_sampleRate;
         const uint64_t firstRead = m_firstReadAtMs.load();
         const uint64_t playedMs = firstRead ? get_sb_time_ms() - firstRead : 0;
 

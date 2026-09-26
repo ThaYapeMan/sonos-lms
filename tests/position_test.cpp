@@ -1,8 +1,9 @@
 #include "position_state.h"
 #include <cassert>
 #include <cstdio>
+#include <initializer_list>
 int main() {
-    const unsigned rate = 44100;
+    for (unsigned rate : {44100u, 48000u}) {
     ConnectionPosition p;
     p.connection(1, 1, 100);
     p.pcm(1, 1, 0, 100);
@@ -44,4 +45,13 @@ int main() {
     p.pcm(2, 5, 50 * rate, 44000);
     assert(p.frames(rate) == 0); // first GET after reset always starts at zero
     puts("PASS: new stream and explicit reset discard the old base and polls");
+    p.connection(3, 6, 50000);
+    p.pcm(3, 6, 0, 50000);
+    p.connection(3, 7, 51000);
+    const uint64_t base = (uint64_t(1) << 32) + rate;
+    p.pcm(3, 7, base, 51000);
+    p.poll(p.token(), 1000, 53000);
+    assert(p.frames(rate) == base + rate);
+    printf("PASS: position anchoring at %u Hz beyond 2^32 frames\n", rate);
+    }
 }

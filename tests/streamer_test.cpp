@@ -3,6 +3,7 @@
 #include "sonos-position.h"
 #include "resume_state.h"
 #include "pause_mode.h"
+#include "audio_mode.h"
 #include "stream_session.h"
 #include "private/socket.h"
 #include "private/wsrequestbroker.h"
@@ -136,7 +137,7 @@ private:
 class Decoder : public FLAC::Decoder::Stream {
 public:
     explicit Decoder(const std::vector<char>& bytes) : bytes(bytes) {}
-    unsigned frames = 0;
+    unsigned frames = 0, rate = 0, bits = 0;
     int first = 0;
     bool error = false;
     FLAC__StreamDecoderReadStatus read_callback(FLAC__byte* buffer, size_t* n) override {
@@ -144,7 +145,8 @@ public:
         memcpy(buffer, bytes.data() + offset, *n); offset += *n;
         return *n ? FLAC__STREAM_DECODER_READ_STATUS_CONTINUE : FLAC__STREAM_DECODER_READ_STATUS_END_OF_STREAM;
     }
-    FLAC__StreamDecoderWriteStatus write_callback(const FLAC__Frame*, const FLAC__int32* const samples[]) override {
+    FLAC__StreamDecoderWriteStatus write_callback(const FLAC__Frame* frame, const FLAC__int32* const samples[]) override {
+        rate = frame->header.sample_rate; bits = frame->header.bits_per_sample;
         if (!frames++) first = samples[0][0];
         return FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE;
     }
@@ -162,17 +164,22 @@ static void serve(SBStreamer& broker, Socket& socket) {
 }
 static void feed(int first, uint64_t firstFrame = 0) {
     // 8192 stereo frames produce real FLAC frames, not merely init metadata.
-    std::vector<int16_t> pcm(8192 * 2);
-    for (unsigned i = 0; i < pcm.size(); ++i) pcm[i] = (first + i * 7919) % 30000;
-    encode_squeezebox_audio(reinterpret_cast<const char*>(pcm.data()), pcm.size() * 2, firstFrame);
+    const unsigned bytes = audioMode() == AudioMode::Legacy ? 2 : 3;
+    std::vector<char> pcm(8192 * 2 * bytes);
+    for (unsigned i = 0; i < 8192 * 2; ++i) {
+        const unsigned sample = (first + i * 7919) % 30000;
+        for (unsigned b = 0; b < bytes; ++b) pcm[i * bytes + b] = sample >> (8 * b);
+    }
+    encode_squeezebox_audio(pcm.data(), pcm.size(), firstFrame);
 }
-static void playable(const Socket& socket, int first) {
+static void playable(const Socket& socket, int first, unsigned rate = 44100) {
     assert(socket.headers.find("200 OK") != std::string::npos);
     assert(socket.body.size() > 4 && memcmp(socket.body.data(), "fLaC", 4) == 0);
     Decoder decoder(socket.body);
     assert(decoder.init() == FLAC__STREAM_DECODER_INIT_STATUS_OK);
     assert(decoder.process_until_end_of_stream());
     assert(!decoder.error && decoder.frames && decoder.first == first);
+    assert(decoder.rate == rate && decoder.bits == (audioMode() == AudioMode::Legacy ? 16u : 24u));
     decoder.finish();
 }
 template<typename Predicate>
@@ -473,8 +480,12 @@ int main(int argc, char** argv) {
         connection(broker, resumed, 2100, false, 18 * 44100);
         assert(get_sonos_position_frames(44100) == 18 * 44100);
         playable(resumed, 2100);
+        const unsigned rate = audioMode() == AudioMode::Legacy ? 44100 : 48000;
+        set_squeezebox_audio_rate(2, rate);
         generation = 2;
         connection(broker, track, 2200);
+        playable(track, 2200, rate);
+        puts("PASS: HTTP FLAC header uses the new stream rate and configured bit depth");
         assert(get_sonos_position_frames(44100) == 0);
         puts("PASS: real streamer/encoder anchors the first PCM of a same-stream GET and resets for a new stream");
         return 0;
