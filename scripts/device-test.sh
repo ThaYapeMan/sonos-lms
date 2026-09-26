@@ -322,6 +322,36 @@ wait_sonos() {
     return 1
 }
 
+# AUTO needs a confirmed state; bound even a blocked SOAP read by the deadline.
+# Keep wait_sonos's manual-mode handling of unavailable state unchanged.
+auto_confirm_pause() {
+    local label=$1 st='' started elapsed remaining reason
+    started=$(( $(date +%s%N) / 1000000 ))
+    while :; do
+        elapsed=$(( $(date +%s%N) / 1000000 - started ))
+        (( elapsed < 5000 )) || break
+        remaining=$(awk -v ms="$((5000 - elapsed))" 'BEGIN { printf "%.3f", ms / 1000 }')
+        st=$(
+            export AUTO AUTO_HELPER COORDINATOR_IP
+            export -f sonos_state
+            timeout "$remaining" bash -c sonos_state
+        ) || st=''
+        elapsed=$(( $(date +%s%N) / 1000000 - started ))
+        if [[ -n $st && $st =~ ^($PAUSED_STATES)$ ]]; then
+            elapsed=$(awk -v ms="$elapsed" 'BEGIN { printf "%.1f", ms / 1000 }')
+            mark "$label PAUSE OK: speaker $st after ${elapsed}s, lms_mode=$(lms_mode)"
+            return 0
+        fi
+        (( elapsed < 5000 )) || break
+        remaining=$(awk -v ms="$((5000 - elapsed))" 'BEGIN { printf "%.3f", ms < 500 ? ms / 1000 : 0.5 }')
+        sleep "$remaining"
+    done
+    reason="$label PAUSE FAIL: speaker ${st:-state unknown} after 5s, lms_mode=$(lms_mode)"
+    mark "$reason"
+    auto_fail "$reason"
+    return 1
+}
+
 snapshot() {
     printf '[%s] LMS %s\n' "$(now)" "$(status_line)" | tee -a "$OUT/steps.log" >&2
     printf '[%s]   now playing -> %s\n' "$(now)" "$(now_playing)" | tee -a "$OUT/steps.log" >&2
@@ -455,7 +485,9 @@ scenario_2() {
             setup_playing_a || { mark "S2 ABORTED: could not restart playback"; return 0; }
         fi
         prompt "S2.$i press PAUSE in the Sonos app"
-        if wait_sonos "$PAUSED_STATES" 10; then
+        if [[ $AUTO == 1 ]]; then
+            auto_confirm_pause "S2.$i" || true
+        elif wait_sonos "$PAUSED_STATES" 10; then
             mark "S2.$i PAUSE OK: speaker $(sonos_state), lms_mode=$(lms_mode)"
         else
             mark "S2.$i PAUSE NOT CONFIRMED: speaker=$(sonos_state), lms_mode=$(lms_mode)"
@@ -540,7 +572,10 @@ scenario_6() {
     mark "S6 long pause from the Sonos app (${LONG_PAUSE}s), then Sonos-app play"
     setup_playing_a || return 0
     prompt "S6 press PAUSE in the Sonos app"
-    if ! wait_sonos "$PAUSED_STATES" 10 || [[ $(lms_mode) != pause ]]; then
+    if [[ $AUTO == 1 ]]; then
+        auto_confirm_pause S6 || return 0
+    fi
+    if { [[ $AUTO != 1 ]] && ! wait_sonos "$PAUSED_STATES" 10; } || [[ $(lms_mode) != pause ]]; then
         mark "S6 ABORTED: pause not confirmed (speaker=$(sonos_state) lms_mode=$(lms_mode))"
         observe "S6 aborted: what does the speaker/app show?"
         return 0
