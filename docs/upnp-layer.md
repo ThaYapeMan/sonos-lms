@@ -133,19 +133,28 @@ GET probe to finish before acknowledging Play.
 
 Position uses a one-second cache. Failed polls mark transport unavailable instead
 of inventing STOPPED or replaying a stale transition. Own polling fills title from
-TrackMetaData (falling back to the sent DIDL title),
+TrackMetaData (falling back to the sent DIDL title when empty or equal to the
+stream URL or its basename, with or without the query),
 track duration from GetPositionInfo, and volume from RenderingControl GetVolume
 (InstanceID 0, Channel Master, `/MediaRenderer/RenderingControl/Control`). Volume
 is cached for at least one second; display reads never send SOAP.
+While the last transport state is STOPPED/PAUSED_PLAYBACK and no response is
+streaming, position reads retain their last value instead of sending SOAP.
+Transport polls continue; a resume or new stream permits fresh position reads.
+A position timeout overlapping an open request while paused emits one informational
+message per pause. The bridge supplies request activity through a read-only callback.
 
 Before retrying PlayStream, both backends freshly query GetTransportInfo and
 GetMediaInfo. PLAYING/TRANSITIONING on the exact current session-and-stream URL
 completes the start without sending SetAVTransportURI/Play again. Unknown state,
 failed reads, STOPPED, or another URL retain the bounded three-attempt retry.
 
-EPIPE/ECONNRESET within two seconds of a pause/stop observation, response end, or
-standby promotion is logged as a normal client close. Other errors or later closes
-retain the send-failure diagnostic.
+In own mode, EPIPE/ECONNRESET classification waits up to two seconds on a separate
+logging worker. A pause/stop observation, response end or standby promotion for
+the same stream within two seconds before or after the error makes it a normal
+client close. Otherwise the original send-failure diagnostic is emitted, exactly
+once. Socket cleanup never waits for classification. Noson keeps its existing
+immediate classification and output.
 
 All seven AVTransport actions use `/MediaRenderer/AVTransport/Control`, InstanceID
 0 and the service namespace `urn:schemas-upnp-org:service:AVTransport:1`.
