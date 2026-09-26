@@ -228,7 +228,7 @@ def room_table(found, configured, states, output):
             group = 'coordinator: ' + '+'.join(members) if coordinator == name else 'member of ' + coordinator
         bridge = ('yes, running' if states[name][1] else 'yes, stopped') if configured.get(name) else 'no'
         if name not in configured:
-            bridge = 'new'
+            bridge = 'new, not bridged'
         if name not in found:
             bridge = 'offline, ' + ('yes' if configured[name] else 'no')
         rows.append((name, model, ip, group, bridge))
@@ -345,16 +345,23 @@ def install(repo, config_dir, unit_dir, args, run=subprocess.run, output=sys.std
     if server is None and current_server is None: server = discovered_server
     shown = server if server is not None else current_server
     print(f'LMS server: {shown or "-"} ({source})', file=output)
+    offer_keep = current_server is not None and bool(configured) and '--reconfigure' not in args
+    keep = False
+
+    def configure_server():
+        nonlocal server
+        while True:
+            answer = ask(f'LMS server [{shown}]: ', input_stream, output)
+            if not answer: break
+            if valid_server(answer):
+                server = answer
+                break
+            print(f'Rejected {quoted_input(answer)}: LMS server must be a host or IP without port or spaces.', file=output)
+
     try:
-        if interactive:
+        if interactive and not offer_keep:
             flush_pending_input(input_stream)
-            while True:
-                answer = ask(f'LMS server [{shown}]: ', input_stream, output)
-                if not answer: break
-                if valid_server(answer):
-                    server = answer
-                    break
-                print(f'Rejected {quoted_input(answer)}: LMS server must be a host or IP without port or spaces.', file=output)
+            configure_server()
         found = {}
         try:
             discovery = run(['./sonos-lms', '--list-rooms', '--details'], cwd=repo, capture_output=True, text=True)
@@ -384,13 +391,12 @@ def install(repo, config_dir, unit_dir, args, run=subprocess.run, output=sys.std
                                         ('[Y/n] ' if rooms[room] else '[y/N] '),
                                         rooms[room], input_stream, output)
         if interactive:
-            if not configured or '--reconfigure' in args:
-                select(found)
-            elif new:
-                select(new)
-                if ask_yes('Change other rooms bridged to LMS? [y/N] ', False, input_stream, output):
-                    select(set(found) - set(new))
-            elif ask_yes('Change which rooms are bridged to LMS? [y/N] ', False, input_stream, output):
+            if offer_keep:
+                flush_pending_input(input_stream)
+                keep = ask_yes('Keep this configuration? [Y/n] ', True, input_stream, output)
+                if not keep:
+                    configure_server()
+            if not keep:
                 select(found)
         merged, new = merge_config(original, found, enabled, server, answers)
         rooms = parse_rooms(merged, warn)
@@ -415,7 +421,7 @@ def install(repo, config_dir, unit_dir, args, run=subprocess.run, output=sys.std
         work = merged != original or actions or template_changed or migrate or build_changed
         if not work:
             print('Nothing to do.', file=output)
-        elif interactive and not ask_yes('Apply? [Y/n] ', True, input_stream, output):
+        elif interactive and not keep and not ask_yes('Apply? [Y/n] ', True, input_stream, output):
             print('Cancelled; no changes applied.', file=output)
             return
     except (KeyboardInterrupt, EOFError):

@@ -296,7 +296,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_interactive_answers_validation_defaults_and_offline(self):
         self.config.write_text('# keep\nLMS_SERVER=old\nroom.Study=ON\nroom.Offline= true \nOTHER=unchanged\n')
-        self.interactive('bad:9000\nbad host\nbad\x01host\nnew.example\nmaybe\ny\nn\ny\n\n\n')
+        self.interactive('n\nbad:9000\nbad host\nbad\x01host\nnew.example\nmaybe\ny\nn\n\n\n')
         self.assertEqual(self.config.read_text(), '# keep\nLMS_SERVER=new.example\nroom.Study=yes\nroom.Offline= true \nOTHER=unchanged\nroom.Kitchen=yes\nroom.Sonos Port=no\n')
         self.assertRegex(self.out.getvalue(), r'Offline +.*offline, yes')
         self.assertIn('"Study" to LMS? [Y/n]', self.out.getvalue())
@@ -314,7 +314,7 @@ class InstallerTests(unittest.TestCase):
                 with patch.object(installer, 'ask', side_effect=KeyboardInterrupt):
                     self.interactive('', runner)
             else:
-                self.interactive('\ny\ny\nn\nn\n' if mode == 'decline' else '', runner)
+                self.interactive('n\n\ny\ny\nn\nn\n' if mode == 'decline' else '', runner)
             self.assertEqual(self.config.read_text(), original)
             self.assertTrue(legacy.exists())
             self.assertFalse(self.unit_dir.exists())
@@ -351,7 +351,7 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('yes, stopped', text)
         header = next(line for line in text.splitlines() if line.startswith('Room '))
         self.assertTrue(header.endswith('Bridge to LMS'))
-        for name, value in [('Kitchen', 'new'), ('Study', 'yes, running'),
+        for name, value in [('Kitchen', 'new, not bridged'), ('Study', 'yes, running'),
                             ('Sonos Port', 'yes, stopped'), ('Offline', 'offline, no')]:
             row = next(line for line in text.splitlines() if line.startswith(name + ' '))
             self.assertEqual(row.index(value), header.index('Bridge to LMS'))
@@ -417,27 +417,44 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(stamp.read_text(), installer.build_identity(ROOT, runner)[1])
         self.assertFalse(list(self.config_dir.glob('.install.*')))
 
-    def test_selection_later_new_reconfigure_and_no_apply_on_noop(self):
+    def test_keep_existing_configuration_and_new_room(self):
         runner = Commands('Study\nSonos Port\n')
         self.config.write_text('LMS_SERVER=host\nroom.Study=yes\nroom.Sonos Port=no\n')
         self.run_install(runner)
         runner.calls.clear()
-        self.interactive('\n\n', runner)
+        self.interactive('\n', runner)
         text = self.out.getvalue()
-        self.assertIn('Change which rooms are bridged to LMS? [y/N]', text)
+        self.assertIn('Keep this configuration? [Y/n]', text)
+        self.assertNotIn('LMS server [', text)
         self.assertNotIn('Bridge Sonos room', text)
         self.assertNotIn('Apply?', text)
+        self.assertIn('Nothing to do.', text)
         self.assertFalse(runner.actions())
         runner.rooms += 'Kitchen\n'
-        self.interactive('\ny\n\n\n', runner)
+        self.interactive('\n', runner)
         text = self.out.getvalue()
-        self.assertIn('"Kitchen" to LMS? [y/N]', text)
-        self.assertIn('Change other rooms bridged to LMS? [y/N]', text)
-        self.assertNotIn('"Study" to LMS?', text)
-        self.assertNotIn('New rooms', text)
-        self.interactive('\n\n\n\n', runner, ('--reconfigure',))
-        self.assertEqual(self.out.getvalue().count('Bridge Sonos room'), 3)
-        self.assertNotIn('Change which', self.out.getvalue())
+        self.assertIn('new, not bridged', text)
+        self.assertNotIn('Bridge Sonos room', text)
+        self.assertNotIn('Apply?', text)
+        self.assertIn('room.Kitchen=no', self.config.read_text())
+        self.assertIn('room.Study=yes', self.config.read_text())
+        self.assertFalse(runner.actions())
+
+    def test_decline_keep_and_reconfigure_ask_every_room(self):
+        runner = Commands('Study\nSonos Port\n')
+        self.config.write_text('LMS_SERVER=host\nroom.Study=yes\nroom.Sonos Port=no\n')
+        self.interactive('n\nnew.host\ny\nn\n\n', runner)
+        text = self.out.getvalue()
+        self.assertIn('Keep this configuration? [Y/n]', text)
+        self.assertIn('LMS server [host]', text)
+        self.assertEqual(text.count('Bridge Sonos room'), 2)
+        self.assertIn('Apply?', text)
+        self.assertIn('LMS_SERVER=new.host', self.config.read_text())
+        self.assertIn('room.Sonos Port=yes', self.config.read_text())
+        self.assertIn('room.Study=no', self.config.read_text())
+        self.interactive('\n\n\n', runner, ('--reconfigure',))
+        self.assertEqual(self.out.getvalue().count('Bridge Sonos room'), 2)
+        self.assertNotIn('Keep this configuration?', self.out.getvalue())
 
     def test_lms_sources_and_mismatch(self):
         runner = Commands('Study\n'); runner.server = 'found'
@@ -502,12 +519,8 @@ class InstallerTests(unittest.TestCase):
                             (b'Bridge Sonos room "Sonos Port" to LMS? [y/N] ', b'y\n'),
                             (b'Bridge Sonos room "Study" to LMS? [y/N] ', b'y\n'),
                             (b'Apply? [Y/n] ', b'\n')]
-            elif case == 'same':
-                prompts += [(b'Change which rooms are bridged to LMS? [y/N] ', b'\n')]
-            elif case == 'new':
-                prompts += [(b'Bridge Sonos room "MBR" to LMS? [y/N] ', b'y\n'),
-                            (b'Change other rooms bridged to LMS? [y/N] ', b'\n'),
-                            (b'Apply? [Y/n] ', b'\n')]
+            elif case in ('same', 'new'):
+                prompts = [(b'Keep this configuration? [Y/n] ', b'\n')]
             else: prompts = []
             deadline = time.monotonic() + 10
             try:
@@ -542,7 +555,8 @@ class InstallerTests(unittest.TestCase):
                 self.assertIn('Nothing to do.', text)
             if case in ('new', 'yes'):
                 self.assertIn('Restart: Sonos Port, Study (new build build-b); playback stops briefly', text)
-                self.assertIn('room.MBR=' + ('yes' if case == 'new' else 'no'), text)
+                self.assertIn('room.MBR=no', text)
+                self.assertNotIn('Apply?', text)
             if case == 'yes':
                 self.assertNotIn('Apply?', text)
                 self.assertIn('New rooms added as no: MBR', text)

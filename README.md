@@ -213,47 +213,47 @@ table with model, IP, group and bridge state. It warns if LMS discovery differs
 from the saved host. An empty `LMS_SERVER` uses discovery; a missing line is added
 with the discovered host or an empty value.
 
-On the first install, it asks about every discovered room. Later runs ask only
-about new rooms, then offer to change the others. With no new rooms, one selection
-question lets you keep the existing choices. Offline rooms retain their config
-lines and appear as offline. Room arguments are enabled without per-room questions.
+On the first install, it asks for the LMS server and every discovered room. When
+an existing config has an `LMS_SERVER` line and at least one room, it shows the
+saved configuration and asks `Keep this configuration? [Y/n]`. Enter or `y` keeps
+it, adds newly discovered rooms as `no`, and displays and applies the plan without
+another confirmation. Answer `n` to configure the LMS server and every discovered
+room, then review the diff and confirm `Apply? [Y/n]`. `--reconfigure` goes straight
+to that full configuration flow. Offline rooms retain their config lines and
+appear as offline. Room arguments are enabled without per-room questions.
 
 Example re-run after a new build and discovery of MBR:
 
 ```text
 sonos-lms installer — build abc1234
 LMS server: 192.0.2.23 (config)
-LMS server [192.0.2.23]:
 Sonos rooms found: 3
 Room        Model   IP          Group                          Bridge to LMS
-MBR         One     192.0.2.24  -                              new
+MBR         One     192.0.2.24  -                              new, not bridged
 Sonos Port  Port    192.0.2.25  member of Study                yes, running
 Study       Play:1  192.0.2.26  coordinator: Study+Sonos Port  yes, running
-Bridge Sonos room "MBR" to LMS? [y/N] y
-Change other rooms bridged to LMS? [y/N]
+Keep this configuration? [Y/n]
 Config:
 --- current config
 +++ proposed config
 @@ -4,2 +4,3 @@
  room.Sonos Port=yes
  room.Study=yes
-+room.MBR=yes
-Start:   MBR
++room.MBR=no
 Restart: Sonos Port, Study (new build abc1234); playback stops briefly
 Build record: update installed-build
-Apply? [Y/n]
 Sonos Port  running   LMS player "Sonos Port (Sonos)" connected
 Study       running   LMS player "Study (Sonos)" connected
-MBR         running   LMS player "MBR (Sonos)" connected
+MBR         disabled
 Logs: journalctl -u 'sonos-lms@*' -f
 ```
 
 With the same build and settings, the plan instead includes:
 
 ```text
-Change which rooms are bridged to LMS? [y/N]
+Keep this configuration? [Y/n]
 Config:  no changes
-Keep:    Sonos Port, Study, MBR
+Keep:    Sonos Port, Study
 Nothing to do.
 ```
 
@@ -295,7 +295,7 @@ Installer flags (`scripts/install-devices.sh`):
 | --- | --- |
 | `--yes` | Apply the displayed plan without prompts; new rooms default to `no`, existing values stay unchanged. |
 | `--non-interactive` | Same as `--yes`; automatic when stdin or stdout is not a TTY. |
-| `--reconfigure` | Ask about every discovered room on a TTY. Non-interactive flags take precedence. |
+| `--reconfigure` | Skip the keep question; ask for the LMS server and every discovered room on a TTY. Non-interactive flags take precedence. |
 | `--restart` | Force restart of every running enabled room; plan reason is `forced`. Stopped enabled rooms are started. |
 | `--server=<host>` | Override the saved LMS host (no port, whitespace or control characters). |
 
