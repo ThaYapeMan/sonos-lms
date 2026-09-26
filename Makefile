@@ -1,6 +1,6 @@
 FLAGS_SL = -g -O3 -Wall -fno-common -Isqueezelite -Wno-error=incompatible-pointer-types -fpermissive
 
-OWN_UPNP_SOURCES = upnp/xml.cpp upnp/http.cpp upnp/soap.cpp upnp/discovery.cpp upnp/own_speaker_control.cpp
+OWN_UPNP_SOURCES = upnp/gena.cpp upnp/xml.cpp upnp/http.cpp upnp/soap.cpp upnp/discovery.cpp upnp/own_speaker_control.cpp
 UPNP_OBJS = $(OWN_UPNP_SOURCES:.cpp=.o) upnp/encoded_buffer.o upnp/noson_stream_server.o upnp/noson_speaker_control.o
 
 OBJS = audio_mode.o $(UPNP_OBJS) sonos-lms.o sbstreamer.o sbencoder.o sonos-status.o sonos-position.o
@@ -99,7 +99,7 @@ sonos-lms.o sbstreamer.o streamer-test: stream_session.h
 
 $(OBJS) streamer-test: upnp/speaker_control.h upnp/stream_server.h upnp/noson_stream_server.h upnp/noson_speaker_control.h
 
-$(UPNP_OBJS) sonos-lms.o: upnp/xml.h upnp/http.h upnp/soap.h upnp/discovery.h upnp/own_speaker_control.h upnp/backend.h
+$(UPNP_OBJS) sonos-lms.o: upnp/xml.h upnp/http.h upnp/soap.h upnp/discovery.h upnp/own_speaker_control.h upnp/backend.h upnp/gena.h
 
 upnp-test: $(wildcard upnp/*.h) tests/upnp_test.cpp upnp/xml.cpp upnp/soap.cpp upnp/http.cpp upnp/discovery.cpp
 	g++ -g -O2 -Wall -Wextra -I. -o $@ $(filter %.cpp,$^)

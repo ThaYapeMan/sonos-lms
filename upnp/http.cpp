@@ -62,10 +62,11 @@ bool parseHttpUrl(const std::string& input, HttpUrl& out) {
     out.path = slash == std::string::npos ? "/" : input.substr(slash);
     return true;
 }
-static HttpResponse request(const std::string& method, const HttpUrl& url, const std::map<std::string, std::string>& headers,
+HttpResponse httpRequest(const std::string& method, const HttpUrl& url, const std::map<std::string, std::string>& headers,
                       const std::string& body, unsigned timeoutMs) {
     HttpResponse result;
     try {
+        if (method.empty() || method.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ") != std::string::npos) throw std::runtime_error("invalid method");
         if (!timeoutMs || !url.port || url.port > 65535 || url.path.empty() || url.path[0] != '/'
             || url.path.find_first_of("\r\n ") != std::string::npos) throw std::runtime_error("invalid endpoint");
         sockaddr_in peer{}; peer.sin_family = AF_INET; peer.sin_port = htons(url.port);
@@ -129,6 +130,7 @@ static HttpResponse request(const std::string& method, const HttpUrl& url, const
                 throw std::runtime_error("duplicate HTTP header");
             p = end + 2;
         }
+        result.headers = fields;
         p = split + 4;
         auto need = [&](size_t end) {
             if (end > limit) throw std::runtime_error("response too large");
@@ -172,10 +174,10 @@ static HttpResponse request(const std::string& method, const HttpUrl& url, const
 }
 HttpResponse httpPost(const HttpUrl& url, const std::map<std::string, std::string>& headers,
                       const std::string& body, unsigned timeoutMs) {
-    return request("POST", url, headers, body, timeoutMs);
+    return httpRequest("POST", url, headers, body, timeoutMs);
 }
 HttpResponse httpGet(const HttpUrl& url, unsigned timeoutMs) {
-    return request("GET", url, {}, "", timeoutMs);
+    return httpRequest("GET", url, {}, "", timeoutMs);
 }
 
 }
