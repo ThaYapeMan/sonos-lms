@@ -103,6 +103,37 @@ ICY metadata, which Sonos requests for MP3/AAC but never for FLAC (see
   seek bar. Whether Sonos accepts this without new pause or gapless problems still
   has to be proven on real speakers.
 
+## Audio quality
+
+| Setting | Values | Default |
+|---|---|---|
+| `SONOS_LMS_AUDIO` | `24/48`: 24-bit FLAC at the source's 44.1/48 kHz rate; `16/44`: legacy 16-bit/44.1 kHz | `24/48` |
+
+The setting is read once at startup and logged. Invalid values warn and use
+`24/48`. Restart the bridge after changing it, for example with a systemd
+`Environment=SONOS_LMS_AUDIO=16/44` override for comparison or older speakers.
+The default targets Sonos S2's 24-bit/48 kHz FLAC support.
+
+At 44.1 and 48 kHz, decoded PCM keeps its sample rate and up to 24 bits of
+precision. A 16-bit source is padded with zero bits, without changing its sample
+values. Bit-exact playback assumes LMS ReplayGain, DSP, crossfade and other sample
+processing are disabled; lossy sources remain lossy.
+
+The output driver lists 48,000 and 44,100 Hz. Slimproto advertises
+`MaxSampleRate=48000` (a maximum, not an exact rate whitelist), so LMS performs
+any necessary downsampling before sending audio. With LMS's standard transcoding
+configuration and working resampler, 88.2 kHz becomes 44.1 kHz, and 96/192 kHz
+becomes 48 kHz. LMS sync-group limits or custom transcoding settings can lower
+that further. See [LMS's sample-rate selection](https://github.com/LMS-Community/slimserver/blob/public/9.0/Slim/Player/CapabilitiesHelper.pm).
+Legacy mode advertises `MaxSampleRate=44100` and retains the previous 16-bit path
+and per-track stream restarts.
+
+A FLAC header fixes its rate for that stream. Natural playlist continuation at
+the same rate keeps the stream gapless; a rate change creates a new stream ID and
+uses the normal PlayStream path, so a short gap is possible. Explicit seeks and
+track replacements still start a new stream. Each new stream logs, for example,
+`stream 12: FLAC 24-bit 48000 Hz`. DIDL remains `audio/flac`.
+
 ## Source layout
 
 | Path | What lives there |
