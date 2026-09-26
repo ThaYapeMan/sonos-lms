@@ -8,7 +8,7 @@ with tempfile.TemporaryDirectory(prefix='sonos-own-display-') as directory:
     subprocess.run(['g++', '-O2', '-Wall', '-Wextra', '-I', str(ROOT),
                     str(ROOT / 'tests/own_display_fixture.cpp'),
                     *[str(ROOT / ('upnp/' + name + '.cpp')) for name in
-                      ('own_speaker_control', 'soap', 'xml', 'discovery')],
+                      ('gena', 'own_speaker_control', 'soap', 'xml', 'discovery')],
                     '-lpthread', '-o', str(executable)], check=True)
     result = subprocess.run([str(executable)], capture_output=True, text=True, check=True)
     print(result.stdout, end='')

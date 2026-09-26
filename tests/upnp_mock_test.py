@@ -2,6 +2,8 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import os
+import http.client
+from urllib.parse import urlsplit
 import subprocess
 import tempfile
 import threading
@@ -21,6 +23,14 @@ class Speaker(BaseHTTPRequestHandler):
         self.send_header('Connection', 'close')
         self.end_headers()
         self.wfile.write(data)
+    def do_SUBSCRIBE(self):
+        self.send_response(200)
+        self.send_header('SID', 'uuid:mock-subscription')
+        self.send_header('TIMEOUT', 'Second-3600')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+    def do_UNSUBSCRIBE(self):
+        self.send('')
     def do_POST(self):
         try:
             self.handle_post()
@@ -71,6 +81,7 @@ class Speaker(BaseHTTPRequestHandler):
             if self.server.mode in ('control', 'delayed-play') and count == 1: time.sleep(6)
             if self.server.mode == 'timeout-playing': time.sleep(21)
         if action == 'SetAVTransportURI': self.server.current_uri = node.findtext('CurrentURI')
+        if action == 'Stop' and self.server.mode in ('get-first', 'event-first'): self.server.stopped = True
         values = ''
         fault = self.server.mode == 'control' and (action == 'Pause' or action == 'Play' and count == 2)
         if fault:
@@ -81,7 +92,7 @@ class Speaker(BaseHTTPRequestHandler):
             return
         if action == 'GetZoneGroupState':
             topology = (ROOT / 'tests/fixtures/topology.xml').read_text()
-            if self.server.mode == 'control' and count >= 3:
+            if self.server.mode in ('control', 'lifecycle') and count >= 3:
                 topology = topology.replace('Coordinator="RINCON_00112233445501400"',
                                             'Coordinator="RINCON_66778899AABB01400"')
             values = '<ZoneGroupState>' + escape(topology) + '</ZoneGroupState>'
@@ -89,6 +100,12 @@ class Speaker(BaseHTTPRequestHandler):
             state = 'PLAYING'
             if self.server.mode == 'poll':
                 state = {3: 'PAUSED_PLAYBACK', 4: 'TRANSITIONING'}.get(count, 'PLAYING')
+            if self.server.mode in ('get-first', 'event-first') and getattr(self.server, 'stopped', False): state = 'STOPPED'
+            if self.server.mode == 'stale' and count >= 2:
+                self.notify('PLAYING', sid='uuid:wrong', expected=412)
+                self.notify('TRANSITIONING')
+                time.sleep(.1)
+                state = 'STOPPED'
             values = f'<CurrentTransportState>{state}</CurrentTransportState><CurrentTransportStatus>OK</CurrentTransportStatus>'
         if action == 'GetPositionInfo': values = '<RelTime>0:02:03</RelTime><TrackDuration>0:04:56</TrackDuration><TrackMetaData>' + escape('<DIDL-Lite><item><dc:title xmlns:dc="urn:dc">Title from speaker</dc:title></item></DIDL-Lite>') + '</TrackMetaData>'
         if action == 'GetVolume':
@@ -150,7 +167,7 @@ with tempfile.TemporaryDirectory(prefix='sonos-play-timeout-') as temp:
     executable = temp / 'play-timeout-test'
     subprocess.run(['g++', '-O2', '-Wall', '-Wextra', '-I', str(ROOT), '-I', str(temp),
                     str(ROOT / 'tests/play_timeout_fixture.cpp'),
-                    *[str(ROOT / ('upnp/' + name + '.cpp')) for name in ('own_speaker_control', 'xml', 'soap', 'http', 'discovery')],
+                    *[str(ROOT / ('upnp/' + name + '.cpp')) for name in ('gena', 'own_speaker_control', 'xml', 'soap', 'http', 'discovery')],
                     '-lpthread', '-lcrypto', '-o', str(executable)], check=True)
     for mode in ('delayed-play', 'timeout-playing'):
         tested = run(mode, [str(executable)])
@@ -170,7 +187,7 @@ with tempfile.TemporaryDirectory(prefix='sonos-own-poll-') as temp:
     executable = temp / 'poll-test'
     subprocess.run(['g++', '-O2', '-Wall', '-Wextra', '-I', str(ROOT), '-I', str(temp),
                     str(ROOT / 'tests/own_poll_fixture.cpp'), str(ROOT / 'sonos-status.cpp'),
-                    *[str(ROOT / ('upnp/' + name + '.cpp')) for name in ('own_speaker_control', 'xml', 'soap', 'http', 'discovery')],
+                    *[str(ROOT / ('upnp/' + name + '.cpp')) for name in ('gena', 'own_speaker_control', 'xml', 'soap', 'http', 'discovery')],
                     '-lpthread', '-lcrypto', '-o', str(executable)], check=True)
     run('poll', [str(executable)])
     settings = temp / 'settings.cpp'
@@ -196,3 +213,145 @@ int main(int argc, char** argv) {
         assert result.stdout.count('UPnP layer:') == 1
         assert result.stdout.count('Warning:') == int(value in ('', 'invalid'))
     print('PASS: SONOS_LMS_UPNP defaults, validation and read-once startup logging')
+
+
+class EventSpeaker(Speaker):
+    def do_POST(self):
+        if self.path == '/test-notify':
+            self.rfile.read(int(self.headers['Content-Length']))
+            self.notify('TRANSITIONING')
+            self.send('')
+        else:
+            super().do_POST()
+    def setup(self):
+        super().setup()
+        self.server = getattr(self.server, 'root', self.server)
+    def do_SUBSCRIBE(self):
+        assert self.path == '/MediaRenderer/AVTransport/Event'
+        now = time.monotonic()
+        sid = self.headers.get('SID')
+        self.server.subscriptions.append((now, dict(self.headers), self.headers['Host']))
+        assert self.headers['TIMEOUT'] == 'Second-3600'
+        if self.server.mode == 'fallback':
+            self.send('', 503)
+            return
+        if sid:
+            assert 'CALLBACK' not in self.headers and 'NT' not in self.headers
+            assert sid == self.server.sid
+            self.server.renewals += 1
+            if self.server.renewals == 1 and self.server.mode == 'lifecycle':
+                self.send('', 412)
+                return
+        else:
+            assert self.headers['NT'] == 'upnp:event'
+            callback = self.headers['CALLBACK']
+            assert callback.startswith('<http://127.0.0.1:') and callback.endswith('/avt>')
+            self.server.callback = callback[1:-1]
+            self.server.fresh += 1
+            self.server.sid = f'uuid:gena-{self.server.fresh}'
+        self.send_response(200)
+        self.send_header('SID', self.server.sid)
+        self.send_header('TIMEOUT', 'Second-2' if self.server.mode == 'lifecycle' else 'Second-3600')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+    def do_UNSUBSCRIBE(self):
+        assert self.path == '/MediaRenderer/AVTransport/Event'
+        self.server.unsubscriptions.append((self.headers['SID'], self.headers['Host']))
+        self.send('')
+    def notify(self, state, sid=None, expected=200):
+        endpoint = urlsplit(self.server.callback)
+        connection = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=2)
+        body = (ROOT / 'tests/fixtures/sonos-lastchange.xml').read_text().replace('PLAYING', state)
+        connection.request('NOTIFY', endpoint.path, body=body.encode(), headers={
+            'SID': sid or self.server.sid, 'SEQ': '12', 'NT': 'upnp:event', 'NTS': 'upnp:propchange'})
+        response = connection.getresponse()
+        assert response.status == expected, response.status
+        response.read(); connection.close()
+
+
+def event_run(mode, command):
+    server = ThreadingHTTPServer(('127.0.0.1', 0), EventSpeaker)
+    server.mode, server.counts, server.requests, server.errors, server.golden = mode, {}, [], [], {}
+    server.current_uri = ''
+    server.sid, server.callback = '', ''
+    server.fresh, server.renewals = 0, 0
+    server.subscriptions, server.unsubscriptions = [], []
+    peer = ThreadingHTTPServer(('127.0.0.2', server.server_port), EventSpeaker)
+    peer.root = server
+    threads = [threading.Thread(target=s.serve_forever) for s in (server, peer)]
+    for thread in threads: thread.start()
+    try:
+        result = subprocess.run([*command, mode, str(server.server_port)], cwd=ROOT,
+                                check=True, capture_output=True, text=True, timeout=20)
+        print(result.stdout, end='')
+        assert not server.errors, server.errors
+        if mode == 'fallback':
+            assert server.fresh == 0 and not server.unsubscriptions
+            assert 'polling only' in result.stdout
+        elif mode == 'lifecycle':
+            assert server.fresh == 3  # original, 412 recovery, coordinator change
+            assert server.renewals >= 2
+            delta = server.subscriptions[1][0] - server.subscriptions[0][0]
+            assert .8 <= delta < 1.7, delta
+            assert len(server.unsubscriptions) == 2, server.unsubscriptions
+            assert server.unsubscriptions[0][1].startswith('127.0.0.1:')
+            assert server.unsubscriptions[1][1].startswith('127.0.0.2:')
+        else:
+            assert server.fresh == 1 and len(server.unsubscriptions) == 1
+        checks = 'polling fallback after subscription failure' if mode == 'fallback' else (
+            'SUBSCRIBE headers/SID, half-time renewal, 412 recovery, coordinator handoff and UNSUBSCRIBE' if mode == 'lifecycle'
+            else 'SID validation, callback delivery and shutdown UNSUBSCRIBE')
+        print(f'PASS: GENA {mode}: {checks}')
+        return result.stdout
+    finally:
+        for s in (server, peer): s.shutdown(); s.server_close()
+        for thread in threads: thread.join()
+
+with tempfile.TemporaryDirectory(prefix='sonos-gena-') as temp:
+    executable = Path(temp) / 'gena-test'
+    subprocess.run(['g++', '-O2', '-Wall', '-Wextra', '-I', str(ROOT),
+                    str(ROOT / 'tests/gena_fixture.cpp'),
+                    *[str(ROOT / ('upnp/' + name + '.cpp')) for name in
+                      ('gena', 'own_speaker_control', 'xml', 'soap', 'http', 'discovery')],
+                    '-lpthread', '-o', str(executable)], check=True)
+    subprocess.run([str(executable)], cwd=ROOT, check=True)
+    for mode in ('lifecycle', 'fallback', 'stale'):
+        event_run(mode, [str(executable)])
+
+    # Reuse the existing device-resume fixture and all production transport
+    # functions. Only its device boundary delegates to real yeney control.
+    fixture = (ROOT / 'tests/device_resume_fixture.cpp').read_text()
+    fixture = fixture.replace('struct Transport {', 'static upnp::SpeakerControl* eventControl = nullptr;\nstruct Transport {')
+    fixture = fixture.replace('Transport transportInfo() { return property; }',
+        'Transport transportInfo() { if (eventControl) { auto t = eventControl->transportInfo(); return {t.state, t.status}; } return property; }')
+    fixture = fixture.replace('++stopCalls;\n        return true;', '++stopCalls;\n        return eventControl ? eventControl->stop() : true;')
+    fixture = fixture.replace('return player.property.state;', 'return player.transportInfo().state;')
+    fixture = fixture.replace('static unsigned decisionLogs = 0;', 'static unsigned decisionLogs = 0, resumeLogs = 0;')
+    fixture = fixture.replace('    fputs(message, stdout);',
+        '    fputs(message, stdout);\n    if (std::string(message).find("Device-initiated resume: current stream") == 0) ++resumeLogs;')
+    fixture = fixture.replace('int main() {', 'int legacyMain() {')
+    fixture = fixture.rstrip()[:-1] + '    return 0;\n}\n'
+    signatures = (
+        'std::string SqueezeBoxURL(unsigned stream_id)',
+        'static bool alreadyPlayingCurrentStream(unsigned stream)\n',
+        'static bool PlaySqueezeBoxLocked(unsigned stream_id, bool resetPosition)\n',
+        'extern "C" void new_squeezebox_stream_id(', 'static void dispatchDeferredStop(',
+        'static void dispatchStreamStart(', 'static void dispatchTransportIntent(',
+        'extern "C" void sonos_lms_transport(', 'static void ObserveDeviceTransport(',
+        'void ResumeSqueezeBox(', 'void refreshStatus(')
+    Path(temp, 'production_resume.inc').write_text('\n'.join(production_function(s) for s in signatures))
+    # Match the definition rather than the forward declaration.
+    callback_start = source.index('void onSonosEvent(void* handle)\n{')
+    callback = source[callback_start:source.index('\n}', callback_start) + 2]
+    fixture += '\nstatic std::atomic<bool> gEvent{false};\n' + callback
+    fixture += '\n' + (ROOT / 'tests/gena_resume_main.inc').read_text()
+    path = Path(temp, 'gena-resume.cpp')
+    path.write_text('#include "upnp/own_speaker_control.h"\n#include "upnp/http.h"\n#include <iostream>\n' + fixture)
+    executable = Path(temp, 'gena-resume')
+    subprocess.run(['g++', '-O2', '-Wall', '-Wextra', '-I', str(ROOT), '-I', str(ROOT/'tests'), '-I', temp,
+                    str(path), *[str(ROOT / ('upnp/' + name + '.cpp')) for name in
+                      ('gena', 'own_speaker_control', 'xml', 'soap', 'http', 'discovery')],
+                    '-lpthread', '-lcrypto', '-o', str(executable)], check=True)
+    for mode in ('event-first', 'get-first'):
+        output = event_run(mode, [str(executable)])
+        assert output.count('Device-initiated resume: current stream') == 1

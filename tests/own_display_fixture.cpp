@@ -11,6 +11,10 @@ static upnp::StreamActivity activity;
 static std::map<std::string, unsigned> calls;
 namespace upnp {
 bool parseHttpUrl(const std::string&, HttpUrl& url) { url = {"127.0.0.1", "/", 1400}; return true; }
+HttpResponse httpRequest(const std::string&, const HttpUrl&, const std::map<std::string, std::string>&,
+                         const std::string&, unsigned) {
+    return {200, "", "127.0.0.1", "", {{"sid", "uuid:display"}, {"timeout", "Second-3600"}}};
+}
 HttpResponse httpGet(const HttpUrl&, unsigned) { return {}; }
 HttpResponse httpPost(const HttpUrl&, const std::map<std::string, std::string>& headers,
                       const std::string&, unsigned) {
