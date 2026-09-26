@@ -1,6 +1,9 @@
 #pragma once
 #include "speaker_control.h"
 #include "soap.h"
+#include "gena.h"
+#include <condition_variable>
+#include <memory>
 #include <chrono>
 #include <functional>
 #include <mutex>
@@ -9,7 +12,10 @@ struct StreamActivity { bool streaming = false, requestOpen = false; };
 class OwnSpeakerControl : public SpeakerControl {
 public:
     explicit OwnSpeakerControl(std::function<unsigned()> streamPort, unsigned speakerPort = 1400,
-                               std::function<StreamActivity()> activity = {});
+                               std::function<StreamActivity()> activity = {},
+                               std::function<void()> eventCallback = {});
+    ~OwnSpeakerControl() override;
+    void shutdownEvents();
     bool discover(const std::string&, const std::string& = {}) override;
     std::vector<std::string> discoverRooms(const std::string& = {}) override;
     std::vector<Speaker> discoverRoomDetails(const std::string& = {}) override;
@@ -45,6 +51,20 @@ private:
     std::string sentTitle, sentUri, sentUrl;
     bool freshStreamPosition = false, pauseTimeoutLogged = false;
     bool positionKnown = false;
+    uint64_t eventRevision = 0;
+    std::function<void()> eventCallback;
+    std::unique_ptr<GenaListener> eventListener;
+    std::mutex eventMutex;
+    std::condition_variable eventWake;
+    std::thread subscriptionThread;
+    bool eventsStopping = false, subscribing = false;
+    std::string eventHost, eventCoordinator, eventSid;
+    uint64_t eventTarget = 0;
+    void startEvents();
+    void subscriptions();
+    bool receiveEvent(const GenaEvent&);
+    // Caller holds cacheMutex. Shared by polling and LastChange.
+    void updateTransport(const std::string& state, const std::string& status);
     bool paused() const;
     SoapResult call(const std::string& action, const SoapArguments& args,
                     const std::string& host = {}, const std::string& service = "AVTransport");

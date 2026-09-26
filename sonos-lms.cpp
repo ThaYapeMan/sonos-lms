@@ -862,12 +862,18 @@ int main(int argc, char** argv)
     configure_squeezebox_close_logging(backend == upnp::Backend::Own);
     auto serverBackend = new upnp::NosonStreamServer(debugLevel, onSonosEvent);
     gStreamServer.reset(serverBackend);
-    if (backend == upnp::Backend::Own)
+    if (backend == upnp::Backend::Own) {
         gPlayer = std::make_shared<upnp::OwnSpeakerControl>([] { return gStreamServer->port(); }, 1400, [] {
             const auto id = streamId.load();
             return upnp::StreamActivity{bool(squeezebox_response_streaming(id)), bool(squeezebox_request_open(id))};
+        }, [] { onSonosEvent(nullptr); });
+        // squeezelite's clean signal path calls exit(), which skips main's
+        // automatic Status (and its shared player reference) destructor.
+        std::atexit([] {
+            auto own = std::dynamic_pointer_cast<upnp::OwnSpeakerControl>(gPlayer);
+            if (own) own->shutdownEvents();
         });
-    else
+    } else
         gPlayer = std::make_shared<upnp::NosonSpeakerControl>(*serverBackend, onSonosEvent);
     if (!room) {
         printf("Please specify a room to join with the --room option\n");

@@ -3,10 +3,117 @@
 #include "http.h"
 #include <cstdio>
 #include <limits>
+#include <cstdlib>
 namespace upnp {
 OwnSpeakerControl::OwnSpeakerControl(std::function<unsigned()> port, unsigned controlPort,
-                                     std::function<StreamActivity()> activity)
-    : streamPort(std::move(port)), speakerPort(controlPort), streamActivity(std::move(activity)) {}
+                                     std::function<StreamActivity()> activity, std::function<void()> callback)
+    : streamPort(std::move(port)), speakerPort(controlPort), streamActivity(std::move(activity)),
+      eventCallback(std::move(callback)) {}
+OwnSpeakerControl::~OwnSpeakerControl() { shutdownEvents(); }
+void OwnSpeakerControl::shutdownEvents() {
+    { std::lock_guard<std::mutex> lock(eventMutex); eventsStopping = true; }
+    eventWake.notify_all();
+    if (subscriptionThread.joinable()) subscriptionThread.join();
+    eventListener.reset(); // join all callbacks before cached state is destroyed
+}
+void OwnSpeakerControl::startEvents() {
+    unsigned port = 0;
+    if (const char* value = std::getenv("SONOS_LMS_EVENT_PORT")) {
+        char* end = nullptr; const auto number = std::strtoul(value, &end, 10);
+        if (!*value || *end || number > 65535) printf("UPnP events: invalid SONOS_LMS_EVENT_PORT; using an ephemeral port\n");
+        else port = number;
+    }
+    try {
+        eventListener.reset(new GenaListener([this](const GenaEvent& event) { return receiveEvent(event); }, port));
+        subscriptionThread = std::thread(&OwnSpeakerControl::subscriptions, this);
+    } catch (const std::exception& error) {
+        eventListener.reset();
+        printf("UPnP events: %s; polling only\n", error.what());
+    }
+}
+void OwnSpeakerControl::subscriptions() {
+    std::string host, sid;
+    unsigned long grantedTimeout = 0;
+    uint64_t target = 0;
+    auto due = Clock::now();
+    auto unsubscribe = [&] {
+        if (!sid.empty()) httpRequest("UNSUBSCRIBE", {host, "/MediaRenderer/AVTransport/Event", speakerPort}, {{"SID", sid}}, "", 500);
+        sid.clear();
+    };
+    for (;;) {
+        std::unique_lock<std::mutex> lock(eventMutex);
+        eventWake.wait_until(lock, due, [&] { return eventsStopping || target != eventTarget; });
+        if (eventsStopping) { lock.unlock(); unsubscribe(); return; }
+        if (target != eventTarget) {
+            lock.unlock(); unsubscribe(); lock.lock();
+            host = eventHost; target = eventTarget;
+        }
+        const bool renewal = !sid.empty();
+        subscribing = !renewal;
+        lock.unlock();
+        std::string address;
+        { std::lock_guard<std::mutex> cache(cacheMutex); address = localAddress; }
+        std::map<std::string, std::string> headers{{"TIMEOUT", "Second-3600"}};
+        if (renewal) headers["SID"] = sid;
+        else {
+            headers["NT"] = "upnp:event";
+            headers["CALLBACK"] = "<http://" + address + ":" + std::to_string(eventListener->port()) + "/avt>";
+        }
+        const auto response = httpRequest("SUBSCRIBE", {host, "/MediaRenderer/AVTransport/Event", speakerPort}, headers, "", 2000);
+        const auto id = response.headers.find("sid"), timeout = response.headers.find("timeout");
+        unsigned long seconds = 0;
+        if (timeout != response.headers.end()) {
+            const auto text = timeout->second;
+            if (text == "Second-infinite") seconds = 3600; // periodically verify even indefinite subscriptions
+            else if (text.compare(0, 7, "Second-") == 0) {
+                char* end = nullptr; seconds = std::strtoul(text.c_str() + 7, &end, 10);
+                if (!*(text.c_str() + 7) || *end || seconds > UINT32_MAX) seconds = 0;
+            }
+        }
+        const bool ok = response.error.empty() && response.status == 200 && id != response.headers.end() && !id->second.empty() && seconds;
+        lock.lock();
+        subscribing = false;
+        if (ok) {
+            sid = id->second;
+            grantedTimeout = seconds;
+            if (target == eventTarget) eventSid = sid;
+            due = Clock::now() + std::chrono::milliseconds(uint64_t(grantedTimeout) * 500);
+            printf("UPnP events: %s SID=%s timeout=%lu s\n", renewal ? "renewed" : "subscribed", sid.c_str(), seconds);
+        } else {
+            printf("UPnP events: SUBSCRIBE %s (HTTP %u); polling only%s\n", response.error.empty() ? "failed" : response.error.c_str(),
+                   response.status, renewal ? "; subscribing afresh" : "");
+            sid.clear();
+            if (target == eventTarget) eventSid.clear();
+            due = Clock::now() + (renewal ? std::chrono::seconds(0) : std::chrono::seconds(30));
+        }
+        lock.unlock(); eventWake.notify_all();
+    }
+}
+bool OwnSpeakerControl::receiveEvent(const GenaEvent& event) {
+    std::string state;
+    {
+        std::unique_lock<std::mutex> lock(eventMutex);
+        // The initial NOTIFY can race the SUBSCRIBE response's SID publication.
+        if (subscribing && eventSid.empty())
+            eventWake.wait_for(lock, std::chrono::milliseconds(500), [&] { return !subscribing || eventsStopping; });
+        if (eventsStopping || eventSid.empty() || event.sid != eventSid) return false;
+        std::lock_guard<std::mutex> cache(cacheMutex);
+        ++eventRevision;
+        updateTransport(event.state, event.status);
+        state = cachedTransport.state;
+    }
+    printf("UPnP event: TransportState=%s seq=%u\n", state.c_str(), event.sequence);
+    if (eventCallback) eventCallback();
+    return true;
+}
+void OwnSpeakerControl::updateTransport(const std::string& state, const std::string& status) {
+    const bool wasPaused = paused();
+    if (!state.empty()) cachedTransport.state = state;
+    if (wasPaused && !paused()) freshStreamPosition = true;
+    if (!paused() || !wasPaused) pauseTimeoutLogged = false;
+    if (!status.empty()) cachedTransport.status = status;
+    cachedTransport.available = true;
+}
 Speaker OwnSpeakerControl::speaker() const { std::lock_guard<std::mutex> lock(cacheMutex); return selected; }
 TransportInfo OwnSpeakerControl::transportInfo() { std::lock_guard<std::mutex> lock(cacheMutex); return cachedTransport; }
 std::string OwnSpeakerControl::controllerUri() {
@@ -74,6 +181,17 @@ bool OwnSpeakerControl::topology(const std::string& host, bool initial) {
         changed = selected.name != next.name || selected.coordinator != next.coordinator || selected.members != next.members;
         selected = next;
     }
+    std::string coordinatorIp, coordinatorId;
+    for (const auto& candidate : speakers) if (candidate.name == next.coordinator) {
+        coordinatorIp = candidate.ip; coordinatorId = candidate.uuid; break;
+    }
+    {
+        std::lock_guard<std::mutex> lock(eventMutex);
+        if (eventHost != coordinatorIp || eventCoordinator != coordinatorId) {
+            eventHost = coordinatorIp; eventCoordinator = coordinatorId;
+            ++eventTarget; eventSid.clear(); eventWake.notify_all();
+        }
+    }
     if (changed) printf("%s\n", groupDescription(next).c_str());
     return true;
 }
@@ -89,7 +207,9 @@ bool OwnSpeakerControl::discover(const std::string& requestedRoom, const std::st
         if (!topology(location.host, true)) continue;
         // Probe selected endpoint as well: seed may be reachable on another NIC.
         poll();
-        return transportInfo().available && !controllerUri().empty();
+        if (!transportInfo().available || controllerUri().empty()) return false;
+        if (!eventListener) startEvents();
+        return true;
     }
     printf("UPnP: failed to discover room '%s'\n", room.c_str());
     return false;
@@ -191,15 +311,14 @@ bool OwnSpeakerControl::positionInfo(uint32_t& ms, std::string* text) {
     ms = positionMs; if (text) *text = positionText; return true;
 }
 bool OwnSpeakerControl::readTransportInfo(TransportInfo& info) {
+    uint64_t revision;
+    { std::lock_guard<std::mutex> lock(cacheMutex); revision = eventRevision; }
     auto result = call("GetTransportInfo", {{"InstanceID", "0"}});
     std::lock_guard<std::mutex> lock(cacheMutex);
-    cachedTransport.available = result.ok && result.response.child("CurrentTransportState") && result.response.child("CurrentTransportStatus");
-    if (cachedTransport.available) {
-        const bool wasPaused = paused();
-        cachedTransport.state = result.response.value("CurrentTransportState");
-        if (wasPaused && !paused()) freshStreamPosition = true;
-        if (!paused() || !wasPaused) pauseTimeoutLogged = false;
-        cachedTransport.status = result.response.value("CurrentTransportStatus");
+    if (revision == eventRevision) {
+        cachedTransport.available = result.ok && result.response.child("CurrentTransportState") && result.response.child("CurrentTransportStatus");
+        if (cachedTransport.available)
+            updateTransport(result.response.value("CurrentTransportState"), result.response.value("CurrentTransportStatus"));
     }
     info = cachedTransport;
     return info.available;
