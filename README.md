@@ -91,8 +91,9 @@ sonos-lms --room="Living Room" [--ip=<sonos-ip>] [--server=<lms-host>]
 
 | Flag | Meaning |
 | --- | --- |
+| `--find-server` | Discover LMS; print only its host/IP and exit 0, or print nothing and exit non-zero. |
 | `--list-rooms` | Print sorted, unique room names, including group members, then exit. Uses `SONOS_LMS_UPNP` and honours `--ip`. |
-| `--room=<name>` | Required except with `--list-rooms`. The Sonos room/zone to take over. |
+| `--room=<name>` | Required except with `--list-rooms` or `--find-server`. The Sonos room/zone to take over. |
 | `--ip=<address>` | Skip Sonos auto-discovery and talk to this player directly (any player in the household will do -- they share topology). Needed if discovery can't reach the Sonos network. |
 | `--server=<host>` | LMS hostname or IP **only**, not a web-UI port. Precedence: explicit `--server` > `LMS_SERVER=` in `/etc/sonos-lms/config` > automatic UDP broadcast discovery on port 3483 (same subnet only; does not cross routers). |
 | `--debug` | Raise noson's own logging verbosity. |

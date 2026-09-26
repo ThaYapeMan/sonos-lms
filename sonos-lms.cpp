@@ -704,7 +704,7 @@ static bool parseDiscoveryResponse(const char* data, size_t len, std::string& ou
     return true;
 }
 
-static std::string discoverLmsServer(unsigned timeoutMs = 3000)
+static std::string discoverLmsServer(unsigned timeoutMs = 3000, bool quiet = false)
 {
     if (!timeoutMs) return ""; // a zero SO_RCVTIMEO would wait indefinitely
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -738,7 +738,7 @@ static std::string discoverLmsServer(unsigned timeoutMs = 3000)
     if (size < 0 || sender.sin_family != AF_INET
         || !parseDiscoveryResponse(data, static_cast<size_t>(size), name)) return "";
     std::string host = inet_ntoa(sender.sin_addr);
-    printf("LMS server from UDP discovery: %s%s%s\n", host.c_str(),
+    if (!quiet) printf("LMS server from UDP discovery: %s%s%s\n", host.c_str(),
         name.empty() ? "" : " name=", name.c_str());
     return host;
 }
@@ -757,6 +757,14 @@ static std::string readLmsServerFromConfig(const char* path = "/etc/sonos-lms/co
         return line.substr(start, line.find_last_not_of(whitespace) - start + 1);
     }
     return "";
+}
+
+static int findServerCommand()
+{
+    const auto host = discoverLmsServer(3000, true);
+    if (host.empty()) return 2;
+    printf("%s\n", host.c_str());
+    return 0;
 }
 
 // Keep stdout machine-readable even when the selected backend logs discovery.
@@ -798,6 +806,7 @@ static int listRoomsCommand(const std::string& ip, int debug)
 int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);
+    if (findFlag(argc, argv, "--find-server")) return findServerCommand();
     if (findFlag(argc, argv, "--list-rooms")) {
         const auto ip = findOption(argc, argv, "--ip");
         return listRoomsCommand(ip ? ip : "", findFlag(argc, argv, "--debug") ? 4 : 0);
