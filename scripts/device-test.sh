@@ -10,7 +10,7 @@
 #   lms-events.log   LMS CLI event stream ("listen 1"): every playlist/pause/play
 #   lms-status.log   LMS status every 2 s: mode, track id, position, playlist stamp
 #   lms-server.log   LMS server.log (only when LMS_SSH is set)
-#   capture.pcap     UPnP (1400) + stream + slimproto (3483) traffic
+#   capture.pcap     all speaker traffic (512-byte snapshots) + slimproto (3483)
 #
 # Usage (as root on the bridge host):
 #   scripts/device-test.sh                  # scenarios 1–7
@@ -25,6 +25,8 @@
 #   TRACK_A     search text, or id:<n> for track A       (default: Just A Little Bit More)
 #   TRACK_B     search text, or id:<n> for track B       (default: False Need)
 #   SCENARIOS   which scenarios to run                   (default: 1 2 3 4 5 6 7)
+#   IDLE_SECS   idle wait after LMS stop in S8           (default: 120)
+#   SONOS_IP    capture peer (default: discovered room coordinator)
 #   LONG_PAUSE  seconds paused in scenario 6             (default: 120)
 #   LMS_SSH     ssh target for the LMS host; empty skips server.log
 #   LMS_LOG     server.log path on the LMS host (default: /var/log/squeezeboxserver/server.log)
@@ -48,6 +50,8 @@ if [[ $AUTO == 1 || $QUICK == 1 ]]; then
 fi
 SCENARIOS=${SCENARIOS:-1 2 3 4 5 6 7}
 LONG_PAUSE=${LONG_PAUSE:-120}
+IDLE_SECS=${IDLE_SECS:-120}
+BRIDGE_LAYER=unknown
 S2_ROUNDS=${S2_ROUNDS:-3}
 LMS_SSH=${LMS_SSH:-}
 LMS_LOG=${LMS_LOG:-/var/log/squeezeboxserver/server.log}
@@ -241,7 +245,7 @@ journal_self_check() {
         sleep .2
     done
     local reason="Journal reader self-check failed: plain journalctl newest '${plain:-missing}', journal_tail newest '${filtered:-missing}'; aborting run"
-    if [[ $AUTO == 1 ]]; then auto_fail "$reason"; auto_record "${s:-setup}"; fi
+    if [[ $AUTO == 1 ]]; then auto_fail "$reason"; auto_record "${RUN_LABEL:-${s:-setup}}"; fi
     fail "$reason"
 }
 bridge_stream() { journal_tail | sed -n 's/^Creating new stream (\([0-9]*\)).*/\1/p' | tail -n1; }
@@ -373,7 +377,7 @@ start_capture() {
 
     if [[ $NO_PCAP != 1 ]]; then
         if have tcpdump; then
-            tcpdump -i any -s 0 -U -w "$OUT/capture.pcap" 'port 1400 or port 3483' \
+            tcpdump -i any -s 512 -U -w "$OUT/capture.pcap" "host $SONOS_IP or port 3483" \
                 2> "$OUT/tcpdump.err" &
             PIDS+=($!)
         else
@@ -414,6 +418,7 @@ finish() {
     fi
     { echo "room=$ROOM unit=$UNIT player=$PLAYER lms=$LMS"
       echo "track_a=$TRACK_A_ID track_b=$TRACK_B_ID scenarios=$SCENARIOS long_pause=$LONG_PAUSE"
+      echo "bridge_upnp_layer=$BRIDGE_LAYER sonos_ip=${SONOS_IP:-unknown} idle_secs=$IDLE_SECS"
       echo "started=$START_TIME finished=$(date '+%Y-%m-%d %H:%M:%S')"
       [[ -d /opt/sonos-lms/.git ]] && echo "bridge=$(git -C /opt/sonos-lms rev-parse --short HEAD)"
     } > "$OUT/run-info.txt"
@@ -618,6 +623,36 @@ scenario_7() {
     observe "S7: plays (p), silent (s), error dialog (e)?"
 }
 
+# Diagnostic only: no device Play is sent during this scenario.
+scenario_8() {
+    mark "S8 idle after LMS stop"
+    setup_playing_a || return 0
+    local since until gets state mode description line
+    since=$(date '+%Y-%m-%d %H:%M:%S.%6N')
+    lms stop
+    mark "S8 idle for $IDLE_SECS s without Play"
+    wait_s "$IDLE_SECS"
+    until=$(date '+%Y-%m-%d %H:%M:%S.%6N')
+    if ! gets=$(journalctl -u "$UNIT" --since "$since" --until "$until" -o cat --no-pager); then
+        [[ $AUTO != 1 ]] || auto_fail "S8 idle journal unavailable"
+        gets=''
+    fi
+    gets=$(printf '%s\n' "$gets" | grep -E '^stream [0-9]+: GET #[0-9]+ headers:' || true)
+    while IFS= read -r line; do
+        [[ -z $line ]] || mark "S8 idle GET: $line"
+    done <<< "$gets"
+    description="GETs: ${gets:-none}"
+    description=${description//$'\n'/; }
+    state=$(sonos_state); mode=$(lms_mode)
+    mark "S8 idle end: speaker=${state:-unknown} lms_mode=${mode:-unknown}; $description"
+    if [[ $AUTO == 1 ]]; then
+        AUTO_MEASUREMENTS+=("$description")
+        if [[ $state != STOPPED || $mode != stop ]]; then
+            auto_fail "S8 idle end: speaker=${state:-unknown} lms_mode=${mode:-unknown}"
+        fi
+    fi
+}
+
 # --------------------------------------------------------- LMS discovery ---
 
 lms_from_exec_start() {
@@ -661,12 +696,24 @@ resolve_lms_host() {
 }
 
 discover_coordinator() {
-    local details
-    if ! details=$(SONOS_LMS_UPNP=yeney ./sonos-lms --list-rooms --details); then
+    local details diagnostics="$OUT/discovery.err"
+    if ! details=$(SONOS_LMS_UPNP=yeney ./sonos-lms --list-rooms --details 2> "$diagnostics"); then
+        cat "$diagnostics" >&2
         say "yeney discovery failed; retrying with noson"
-        details=$(SONOS_LMS_UPNP=noson ./sonos-lms --list-rooms --details) || return 1
+        details=$(SONOS_LMS_UPNP=noson ./sonos-lms --list-rooms --details 2> "$diagnostics") || { cat "$diagnostics" >&2; return 1; }
     fi
     printf '%s\n' "$details" | python3 "$AUTO_HELPER" coordinator --room "$ROOM"
+}
+
+bridge_layer() {
+    local invocation layer
+    invocation=$(systemctl show "$UNIT" -p InvocationID --value 2>/dev/null) || invocation=''
+    if [[ $invocation =~ ^[[:xdigit:]]{32}$ ]]; then
+        layer=$(journalctl -u "$UNIT" "_SYSTEMD_INVOCATION_ID=$invocation" -o cat --no-pager 2>/dev/null |
+            sed -nE 's/^UPnP layer: (noson|yeney).*/\1/p' | tail -n1)
+    fi
+    BRIDGE_LAYER=${layer:-unknown}
+    say "Bridge UPnP layer: $BRIDGE_LAYER"
 }
 
 # AUTO failures accumulate; recovery can never erase a failed check.
@@ -710,14 +757,15 @@ auto_end() {
     auto_record "$1"
 }
 auto_record() {
-    local reason
+    local reason success="progress, position/song and transport checks passed"
+    [[ ${1%%#*} != 8 ]] || success="idle stop checks passed"
     if (( ${#AUTO_REASONS[@]} )); then
         reason=$(IFS=';'; printf '%s' "${AUTO_REASONS[*]}")
         reason=${reason//$'\n'/; }
-        SUMMARY+=("S$1 | FAIL | $reason")
+        SUMMARY+=("S$1 | FAIL | $reason${AUTO_MEASUREMENTS[*]:+; ${AUTO_MEASUREMENTS[*]}}")
         AUTO_FAILED=1
     else
-        SUMMARY+=("S$1 | PASS | progress, position/song and transport checks passed${AUTO_MEASUREMENTS[*]:+; ${AUTO_MEASUREMENTS[*]}}")
+        SUMMARY+=("S$1 | PASS | $success${AUTO_MEASUREMENTS[*]:+; ${AUTO_MEASUREMENTS[*]}}")
     fi
 }
 auto_summary() {
@@ -763,19 +811,31 @@ else
     mark "AUTO coordinator $COORDINATOR_IP; scenarios $SCENARIOS"
 fi
 
+bridge_layer
+if [[ -z ${SONOS_IP:-} && $NO_PCAP != 1 ]]; then
+    SONOS_IP=${COORDINATOR_IP:-$(discover_coordinator)} || fail "Speaker capture address unknown; set SONOS_IP"
+fi
+[[ $IDLE_SECS =~ ^[0-9]+$ ]] || fail "IDLE_SECS must be nonnegative seconds"
+
 trap finish EXIT
 trap 'exit 130' INT TERM
 start_capture
 mark "RUN START room=$ROOM player=$PLAYER track_a=$TRACK_A_ID track_b=$TRACK_B_ID"
 JOURNAL_SINCE="-5min" snapshot
 
+declare -A SCENARIO_TOTALS=() SCENARIO_COUNTS=()
+for s in $SCENARIOS; do SCENARIO_TOTALS[$s]=$(( ${SCENARIO_TOTALS[$s]:-0} + 1 )); done
 for s in $SCENARIOS; do
-    if [[ $AUTO == 1 ]]; then auto_begin "$s"; fi
+    SCENARIO_COUNTS[$s]=$(( ${SCENARIO_COUNTS[$s]:-0} + 1 ))
+    RUN_LABEL=$s
+    if (( SCENARIO_TOTALS[$s] > 1 )); then RUN_LABEL="$s#${SCENARIO_COUNTS[$s]}"; fi
+    mark "SCENARIO S$RUN_LABEL"
+    if [[ $AUTO == 1 ]]; then auto_begin "$RUN_LABEL"; fi
     if declare -F "scenario_$s" >/dev/null; then "scenario_$s"; else
         say "unknown scenario $s"
         [[ $AUTO != 1 ]] || auto_fail "unknown scenario $s"
     fi
-    if [[ $AUTO == 1 ]]; then auto_end "$s"; fi
+    if [[ $AUTO == 1 ]]; then auto_end "$RUN_LABEL"; fi
 done
 
 mark "RUN END (LMS pause)"

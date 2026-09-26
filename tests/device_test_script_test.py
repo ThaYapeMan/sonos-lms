@@ -474,6 +474,7 @@ with tempfile.TemporaryDirectory(prefix='sonos-discovery-backend-') as directory
 ROOM=Study
 ./sonos-lms() {
     printf '%s %s\n' "$SONOS_LMS_UPNP" "$*" >> "$CALLS"
+    printf 'UPnP layer: %s\n' "$SONOS_LMS_UPNP" >&2
     [[ $FALLBACK != 1 || $SONOS_LMS_UPNP != yeney ]] || return 2
     printf 'Study\tPlay:1\t192.0.2.10\tStudy\tStudy\n'
 }
@@ -482,6 +483,64 @@ discover_coordinator
 '''], env={**os.environ, 'OUT': directory, 'FALLBACK': fallback, 'CALLS': str(calls),
            'REAL_HELPER': str(ROOT / 'scripts/device_test_auto.py')}, capture_output=True, text=True)
         assert result.returncode == 0 and result.stdout.strip() == '192.0.2.10', result
+        if fallback == '0': assert 'UPnP layer:' not in result.stderr, result.stderr
         assert calls.read_text().splitlines() == ['yeney --list-rooms --details'] + (
             ['noson --list-rooms --details'] if fallback == '1' else [])
 print('PASS: AUTO discovery explicitly selects yeney, uses noson only after yeney failure')
+
+with tempfile.TemporaryDirectory(prefix='sonos-diagnostics-') as directory:
+    env = {**os.environ, 'OUT': directory, 'AUTO': '1', 'IDLE_SECS': '120', 'UNIT': 'fixture'}
+    idle = r'''
+setup_playing_a() { :; }
+mark() { printf '%s\n' "$*"; }
+lms() { [[ $* == stop ]] || exit 91; }
+wait_s() { [[ $1 == 120 ]] || exit 92; }
+journalctl() {
+    [[ $* == *--since* && $* == *--until* ]] || exit 93
+    printf '%s\n' 'stream 5: GET #8 headers: User-Agent=Sonos' 'unrelated'
+    printf '%s\n' 'stream 5: GET #9 headers: Range=bytes=0-'
+}
+sonos_state() { printf '%s' "$STATE"; }
+lms_mode() { printf '%s' "$MODE"; }
+scenario_8
+auto_record 8
+auto_summary
+exit "$AUTO_FAILED"
+'''
+    for state, mode, code in [('STOPPED', 'stop', 0), ('PLAYING', 'stop', 1), ('', 'stop', 1), ('STOPPED', 'play', 1)]:
+        result = subprocess.run(['bash', '-c', prefix + idle], env={**env, 'STATE': state, 'MODE': mode}, capture_output=True, text=True)
+        assert result.returncode == code, result
+        assert 'GET #8 headers:' in result.stdout and 'GET #9 headers:' in result.stdout
+        assert ('S8 | PASS |' if code == 0 else 'S8 | FAIL |') in result.stdout
+    print('PASS: S8 sends only LMS stop, waits IDLE_SECS, reports all idle GETs and requires STOPPED plus LMS stop')
+
+    for layer in ('noson', 'yeney'):
+        code = r'''
+UNIT=fixture
+systemctl() { printf '0123456789abcdef0123456789abcdef\n'; }
+journalctl() {
+    [[ $* == *'_SYSTEMD_INVOCATION_ID=0123456789abcdef0123456789abcdef'* ]] || exit 95
+    printf 'UPnP layer: %s (alias own)\n' "$LAYER"
+}
+bridge_layer
+[[ $BRIDGE_LAYER == "$LAYER" ]]
+'''
+        result = subprocess.run(['bash', '-c', prefix + code], env={**env, 'LAYER': layer}, capture_output=True, text=True)
+        assert result.returncode == 0 and f'Bridge UPnP layer: {layer}' in result.stderr, result
+    assert 'bridge_upnp_layer=$BRIDGE_LAYER' in script
+    assert 'tcpdump -i any -s 512' in script and '"host $SONOS_IP or port 3483"' in script
+    print('PASS: bridge layer comes from the current service invocation and is recorded; capture includes every speaker port at snaplen 512')
+
+    repeat_stubs = stubs + r'''
+bridge_layer() { BRIDGE_LAYER=yeney; }
+auto_begin() { AUTO_REASONS=(); printf 'monitor=%s\n' "$1"; }
+scenario_7() { if [[ $RUN_LABEL == '7#2' ]]; then auto_fail 'second run failed'; fi; }
+'''
+    result = subprocess.run(['bash', '-c', prefix + repeat_stubs + main],
+                            env={**env, 'PLAYER': 'fixture', 'SCENARIOS': '7 7 7'}, capture_output=True, text=True)
+    assert result.returncode == 1, result
+    for number, status in [(1, 'PASS'), (2, 'FAIL'), (3, 'PASS')]:
+        assert f'S7#{number} | {status} |' in result.stdout, result
+        assert f'monitor=7#{number}' in result.stdout, result
+    assert 'AUTO_STATUS_FILE="$OUT/auto-status-$1.log"' in script
+    print('PASS: repeated scenarios have separate labels and monitor files; a failed run is retained in the summary')
