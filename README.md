@@ -418,7 +418,7 @@ alias so existing drop-ins keep working. **noson remains the default until yeney
 has proven itself**; yeney is experimental in phase 1. For example:
 
 ```sh
-SONOS_LMS_UPNP=yeney ./sonos-lms --room="Sonos Port" --server=192.168.178.10
+SONOS_LMS_UPNP=yeney ./sonos-lms --room="Sonos Port" --server=192.0.2.10
 ```
 
 For a service, set `Environment=SONOS_LMS_UPNP=yeney` in its systemd override.
