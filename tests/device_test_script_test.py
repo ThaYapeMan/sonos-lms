@@ -415,6 +415,37 @@ for contents, diagnostic in [('', 'cannot check'), (samples.getvalue(), 'ERROR_N
     try: auto.check_status_log(contents)
     except RuntimeError as error: assert diagnostic in str(error)
     else: raise AssertionError('missing or bad samples passed')
+def status_log(*records):
+    return '\n'.join(json.dumps(record) for record in records)
+
+
+def timeout_sample(timestamp):
+    return {'timestamp': timestamp, 'error': 'timed out'}
+
+
+def ok_sample(timestamp):
+    return {'timestamp': timestamp, 'state': 'PLAYING', 'status': 'OK'}
+
+
+assert '1 SOAP timeout tolerated' in auto.check_status_log(status_log(timeout_sample(10), ok_sample(15.5)))
+assert '2 SOAP timeouts tolerated' in auto.check_status_log(status_log(timeout_sample(10), timeout_sample(12), ok_sample(17)))
+print('PASS: AUTO tolerates one or consecutive SOAP timeouts with OK recovery within 7 s of the first timeout')
+for records in [
+    (timeout_sample(10), ok_sample(17.1)),
+    (ok_sample(10), timeout_sample(11)),
+    (timeout_sample(10), dict(ok_sample(11), status='ERROR_NO_PLAYABLE_CONTENT')),
+    (timeout_sample(10), timeout_sample(12), ok_sample(18)),
+    (dict(timeout_sample(10), error='connection refused'), ok_sample(11)),
+    (timeout_sample(10), dict(ok_sample(11), state='')),
+]:
+    try:
+        auto.check_status_log(status_log(*records))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError(f'Invalid timeout recovery passed: {records}')
+print('PASS: AUTO rejects late, trailing, non-OK, missing-state and non-timeout failures')
+
 print('PASS: AUTO monitor records timestamped OK/state/error samples; empty and malformed logs cannot pass')
 
 with tempfile.TemporaryDirectory(prefix='sonos-empty-status-') as directory:

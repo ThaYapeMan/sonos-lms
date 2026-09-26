@@ -148,17 +148,41 @@ def check_status_log(text):
     if not text.strip():
         raise RuntimeError('cannot check: empty GetTransportInfo sample log')
     errors = []
+    pending = []
+    tolerated = 0
     for number, line in enumerate(text.splitlines(), 1):
         try:
             record = json.loads(line)
-            if record.get('error') or record.get('status') != 'OK' or not record.get('state'):
-                errors.append(f'sample {number}: CurrentTransportStatus={record.get("status", "missing")} '
-                              f'{record.get("error", "")}')
+            error = str(record.get('error', ''))
+            timeout = 'timed out' in error.lower() or 'timeout' in error.lower()
+            if timeout and record.get('status', 'OK') == 'OK':
+                # Consecutive busy reads share the first timeout's recovery deadline.
+                pending.append((number, record.get('timestamp')))
+                continue
+            valid = not error and record.get('status') == 'OK' and bool(record.get('state'))
+            if not valid:
+                detail = error or ("missing state" if not record.get("state") else "")
+                errors.append(f'sample {number}: CurrentTransportStatus={record.get("status", "missing")} {detail}')
+            if pending:
+                times = [stamp for _, stamp in pending] + [record.get('timestamp')]
+                timely = all(isinstance(stamp, (int, float)) for stamp in times) and all(
+                    0 <= later - times[0] <= 7 for later in times[1:])
+                if valid and timely:
+                    tolerated += len(pending)
+                else:
+                    errors.append(f'sample {pending[0][0]}: SOAP timeout without valid OK recovery within 7 s')
+                pending = []
         except (ValueError, AttributeError):
             errors.append(f'cannot check sample {number}: invalid record {line!r}')
+    if pending:
+        errors.append(f'sample {pending[0][0]}: SOAP timeout at end of log without recovery')
     if errors:
         raise RuntimeError('; '.join(errors))
-    return f'{len(text.splitlines())} GetTransportInfo samples: status OK'
+    summary = f'{len(text.splitlines())} GetTransportInfo samples: status OK'
+    if tolerated:
+        summary += (f'; {tolerated} SOAP timeout{"s" if tolerated != 1 else ""} tolerated '
+                    '(speaker busy on stream request)')
+    return summary
 
 
 def main():

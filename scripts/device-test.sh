@@ -697,6 +697,7 @@ auto_end() {
     python3 "$AUTO_HELPER" sample --host "$COORDINATOR_IP" >> "$AUTO_STATUS_FILE" 2>&1
     if errors=$(python3 "$AUTO_HELPER" status-log --file "$AUTO_STATUS_FILE" 2>&1); then
         mark "AUTO $errors"
+        AUTO_MEASUREMENTS+=("$errors")
     else
         auto_fail "$errors"
     fi
