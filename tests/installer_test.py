@@ -3,6 +3,9 @@ from pathlib import Path
 import importlib.util
 import io
 import os
+import pty
+import select
+import time
 import stat
 import subprocess
 import sys
@@ -20,6 +23,7 @@ spec.loader.exec_module(installer)
 class Commands:
     def __init__(self, rooms='Study\nSonos Port\nKitchen\n', discovery_status=0):
         self.rooms, self.discovery_status = rooms, discovery_status
+        self.server = ''
         self.calls = []
         self.active, self.enabled, self.missing = set(), set(), set()
 
@@ -29,6 +33,8 @@ class Commands:
             assert kwargs['cwd'] == ROOT
             return subprocess.CompletedProcess(args, self.discovery_status, self.rooms,
                                                'No Sonos rooms found.' if self.discovery_status else '')
+        if args == ['./sonos-lms', '--find-server']:
+            return subprocess.CompletedProcess(args, 0 if self.server else 2, self.server, '')
         if args[0] == 'systemd-escape':
             return subprocess.run(args, **kwargs)
         assert args[0] == 'systemctl', args
@@ -91,7 +97,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_first_install_discovers_disabled_rooms_only(self):
         runner = self.run_install()
-        self.assertEqual(self.config.read_text(), installer.ROOM_HEADER
+        self.assertEqual(self.config.read_text(), installer.LMS_COMMENT + 'LMS_SERVER=\n' + installer.ROOM_HEADER
                          + 'room.Kitchen=no\nroom.Sonos Port=no\nroom.Study=no\n')
         self.assertFalse(runner.enabled)
         self.assertFalse(runner.active)
@@ -161,14 +167,14 @@ class InstallerTests(unittest.TestCase):
 
     def test_empty_discovery_and_absent_config(self):
         self.run_install(Commands(''))
-        self.assertFalse(self.config.exists())
+        self.assertEqual(self.config.read_text(), installer.LMS_COMMENT + 'LMS_SERVER=\n')
         self.assertIn('Room discovery failed', self.err.getvalue())
         self.assertIn('No rooms configured.', self.out.getvalue())
 
     def test_failure_still_accepts_explicit_overrides(self):
         self.config.write_text('room.Study=no\n')
         self.run_install(Commands('', 2), ('Study', '--server=example'))
-        self.assertEqual(self.config.read_text(), 'room.Study=yes\nLMS_SERVER=example\n')
+        self.assertEqual(self.config.read_text(), 'room.Study=yes\n' + installer.LMS_COMMENT + 'LMS_SERVER=example\n')
 
     def test_disabled_unknown_values_and_unrelated_units(self):
         self.config.write_text('room.Study=oops\nroom.Kitchen=OFF\n')
@@ -203,7 +209,7 @@ class InstallerTests(unittest.TestCase):
         (self.config_dir / 'rooms.migrated').write_text('saved original\n')
         (self.config_dir / 'rooms').write_text('Study\n')
         self.run_install(Commands('Study\n'))
-        self.assertEqual(self.config.read_text(), 'room.Study=no\n')
+        self.assertEqual(self.config.read_text(), 'room.Study=no\n' + installer.LMS_COMMENT + 'LMS_SERVER=\n')
         self.assertEqual((self.config_dir / 'rooms.migrated').read_text(), 'saved original\n')
         self.assertIn('migration already completed', self.err.getvalue())
 
@@ -216,6 +222,118 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(['systemd-escape', '--template=sonos-lms@.service', '--', 'Room $(literal)'], runner.calls)
         self.assertNotIn('room.Bad', self.config.read_text())
         self.assertIn('Cannot represent discovered room', self.err.getvalue())
+
+
+
+    def interactive(self, answers, runner=None, args=()):
+        runner = runner or Commands()
+        class TTY(io.StringIO):
+            def isatty(self): return True
+        self.out = TTY()
+        installer.install(ROOT, self.config_dir, self.unit_dir, args, runner,
+                          self.out, self.err, TTY(answers))
+        return runner
+
+    def test_lms_found_empty_existing_and_override(self):
+        for host in ('lms.example', ''):
+            self.config.unlink(missing_ok=True)
+            runner = Commands(); runner.server = host
+            self.run_install(runner)
+            self.assertTrue(self.config.read_text().startswith(installer.LMS_COMMENT + f'LMS_SERVER={host}\n'))
+        for host in ('original', ''):
+            self.config.write_text(f'LMS_SERVER={host}\n')
+            runner = self.run_install()
+            self.assertTrue(self.config.read_text().startswith(f'LMS_SERVER={host}\n'))
+            self.assertNotIn(['./sonos-lms', '--find-server'], runner.calls)
+        self.run_install(args=('--server=override',))
+        self.assertIn('LMS_SERVER=override', self.config.read_text())
+
+    def test_interactive_answers_validation_defaults_and_offline(self):
+        self.config.write_text('# keep\nLMS_SERVER=old\nroom.Study=ON\nroom.Offline= true \nOTHER=unchanged\n')
+        self.interactive('bad:9000\nbad host\nbad\x01host\nnew.example\nmaybe\ny\nn\n\n\n')
+        self.assertEqual(self.config.read_text(), '# keep\nLMS_SERVER=new.example\nroom.Study=yes\nroom.Offline= true \nOTHER=unchanged\nroom.Kitchen=yes\nroom.Sonos Port=no\n')
+        self.assertIn('offline, kept: Offline (yes)', self.out.getvalue())
+        self.assertIn('"Study"? [Y/n]', self.out.getvalue())
+        self.assertEqual(self.out.getvalue().count('LMS server [old]:'), 4)
+        self.assertEqual(self.out.getvalue().count('"Kitchen"? [y/N]'), 2)
+
+    def test_cancel_interrupt_and_eof_leave_everything_untouched(self):
+        original = 'LMS_SERVER=old\nroom.Study=ON\n'
+        self.config.write_text(original)
+        legacy = self.config_dir / 'rooms'; legacy.write_text('Study\n')
+        for mode in ('decline', 'interrupt', 'eof'):
+            runner = Commands()
+            if mode == 'interrupt':
+                with patch.object(installer, 'ask', side_effect=KeyboardInterrupt):
+                    self.interactive('', runner)
+            else:
+                self.interactive('\ny\ny\nn\nn\n' if mode == 'decline' else '', runner)
+            self.assertEqual(self.config.read_text(), original)
+            self.assertTrue(legacy.exists())
+            self.assertFalse(self.unit_dir.exists())
+            self.assertFalse(any(call[0] == 'systemctl' for call in runner.calls))
+
+    def test_flags_no_tty_and_explicit_room(self):
+        for args in (('--yes',), ('--non-interactive',), ('--yes', '--reconfigure')):
+            self.config.unlink(missing_ok=True)
+            self.interactive('', args=args)
+            self.assertNotIn('Apply?', self.out.getvalue())
+            self.assertIn('room.Study=no', self.config.read_text())
+        self.config.unlink()
+        self.run_install(args=('--reconfigure',))  # non-TTY still never asks
+        self.assertIn('room.Study=no', self.config.read_text())
+        self.interactive('\n\n\n\n', args=('Study', '--reconfigure'))
+        self.assertNotIn('"Study"?', self.out.getvalue())
+        self.assertIn('room.Study=yes', self.config.read_text())
+
+    def test_real_tty_session_and_yes(self):
+        for non_interactive in (False, True):
+            self.config.unlink(missing_ok=True)
+            master, slave = pty.openpty()
+            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
+                                        '--pty-child', self.temp.name]
+                                       + (['--yes'] if non_interactive else []),
+                                       stdin=slave, stdout=slave, stderr=slave)
+            os.close(slave)
+            transcript = b''
+            prompts = [(b'LMS server [lms.example]: ', b'\n'),
+                       (b'Activate Sonos room "Kitchen"? [y/N] ', b'n\n'),
+                       (b'Activate Sonos room "Sonos Port"? [y/N] ', b'y\n'),
+                       (b'Activate Sonos room "Study"? [y/N] ', b'y\n'),
+                       (b'Apply? [Y/n] ', b'\n')] if not non_interactive else []
+            deadline = time.monotonic() + 10
+            try:
+                while time.monotonic() < deadline:
+                    if select.select([master], [], [], 0.1)[0]:
+                        try: chunk = os.read(master, 65536)
+                        except OSError: break
+                        if not chunk: break
+                        transcript += chunk
+                        if prompts and prompts[0][0] in transcript:
+                            os.write(master, prompts.pop(0)[1])
+                    elif process.poll() is not None:
+                        break
+                self.assertEqual(process.wait(timeout=1), 0)
+                self.assertFalse(prompts)
+            finally:
+                if process.poll() is None:
+                    process.kill(); process.wait()
+                os.close(master)
+            text = transcript.decode().replace('\r\n', '\n')
+            Path('/tmp/sonos-installer-' + ('yes' if non_interactive else 'interactive') + '.txt').write_text(text)
+            self.assertIn(installer.LMS_COMMENT + 'LMS_SERVER=lms.example', text)
+            self.assertIn('room.Sonos Port=' + ('no' if non_interactive else 'yes'), text)
+            self.assertIn('room.Study=' + ('no' if non_interactive else 'yes'), text)
+            if non_interactive:
+                self.assertNotIn('Apply?', text)
+
+    def test_enter_keeps_found_server_and_room_defaults(self):
+        runner = Commands(); runner.server = 'found.example'
+        self.interactive('\n\nYES\nNO\nY\n', runner)
+        self.assertIn('LMS_SERVER=found.example', self.config.read_text())
+        self.assertIn('room.Kitchen=no', self.config.read_text())
+        self.assertIn('room.Sonos Port=yes', self.config.read_text())
+        self.assertIn('room.Study=no', self.config.read_text())
 
 
 def dry_run_report():
@@ -236,7 +354,17 @@ def dry_run_report():
 
 
 if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == '--pty-child':
+        base = Path(sys.argv[2])
+        runner = Commands(); runner.server = 'lms.example'
+        installer.install(ROOT, base / 'etc/sonos-lms', base / 'etc/systemd/system',
+                          sys.argv[3:], runner)
+        print('Resulting config:')
+        print((base / 'etc/sonos-lms/config').read_text(), end='')
+        raise SystemExit(0)
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(InstallerTests)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful(): raise SystemExit(1)
+    for test in unittest.defaultTestLoader.getTestCaseNames(InstallerTests):
+        print('PASS: installer ' + test.removeprefix('test_'))
     dry_run_report()

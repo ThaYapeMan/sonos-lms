@@ -6,9 +6,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 
 ROOM_HEADER = ('# Sonos rooms found on the network.\n'
                '# yes = bridge this room to LMS, no = ignore it.\n')
+LMS_COMMENT = '# LMS host or IP (no port). Empty = automatic discovery on the local network.\n'
 TRUE = {'yes', '1', 'true', 'on'}
 FALSE = {'no', '0', 'false', 'off'}
 
@@ -17,21 +19,30 @@ def valid_room(name):
     return bool(name and not name.isspace() and not any(c in name for c in '=\r\n\0'))
 
 
+def valid_server(value):
+    return not any(c == ':' or c.isspace() or unicodedata.category(c).startswith('C') for c in value)
+
+
 def arguments(args):
     server = None
     rooms = []
+    non_interactive = False
     for arg in args:
         if arg.startswith('--server='):
             server = arg[len('--server='):]
-            if any(c in server for c in '\r\n\0'):
-                raise ValueError('Server must not contain newlines or NUL.')
+            if not valid_server(server):
+                raise ValueError('Server must have no port, whitespace or control characters.')
+        elif arg in ('--yes', '--non-interactive'):
+            non_interactive = True
+        elif arg == '--reconfigure':
+            pass  # TTY installs already ask every question; never override automation.
         elif arg.startswith('--'):
-            raise ValueError('Usage: scripts/install-devices.sh [--server=<lms-host-or-ip>] [room ...]')
+            raise ValueError('Usage: scripts/install-devices.sh [--server=<lms-host-or-ip>] [--yes|--non-interactive|--reconfigure] [room ...]')
         elif not valid_room(arg):
             raise ValueError('Room names must be nonempty and cannot contain "=", newlines or NUL.')
         else:
             rooms.append(arg)
-    return server, rooms
+    return server, rooms, non_interactive
 
 
 def setting(line):
@@ -61,13 +72,15 @@ def parse_rooms(text, warn):
     return rooms
 
 
-def merge_config(text, discovered, enabled, server=None):
+def merge_config(text, discovered, enabled, server=None, answers=None):
     """Preserve all unmodified bytes, including comments, CRLF and unknown values."""
     lines = text.splitlines(keepends=True)
     existing = {entry[0][5:] for line in lines if (entry := setting(line))
                 and entry[0].startswith('room.')}
     new = sorted(set(discovered) - existing)
+    answers = answers or {}
     updates = {'room.' + name: 'yes' for name in enabled}
+    updates.update({'room.' + name: 'yes' if value else 'no' for name, value in answers.items()})
     if server is not None:
         updates['LMS_SERVER'] = server
     seen = set()
@@ -88,12 +101,12 @@ def merge_config(text, discovered, enabled, server=None):
         result += line
 
     if server is not None and 'LMS_SERVER' not in seen:
-        append('LMS_SERVER=' + server + '\n')
+        append(LMS_COMMENT + 'LMS_SERVER=' + server + '\n')
     additions = sorted((set(discovered) | set(enabled)) - existing)
     if additions and not existing:
         append(ROOM_HEADER)
     for name in additions:
-        append('room.' + name + ('=yes\n' if name in enabled else '=no\n'))
+        append('room.' + name + ('=yes\n' if answers.get(name, name in enabled) else '=no\n'))
     return result, new
 
 
@@ -121,8 +134,29 @@ def atomic_write(path, text, mode=0o644):
             os.unlink(name)
 
 
-def install(repo, config_dir, unit_dir, args, run=subprocess.run, output=sys.stdout, errors=sys.stderr):
-    server, enabled = arguments(args)
+def ask(prompt, input_stream, output):
+    print(prompt, end='', file=output, flush=True)
+    value = input_stream.readline()
+    if not value:
+        raise EOFError('Input closed; installation cancelled.')
+    return value.rstrip('\r\n')
+
+
+def ask_yes(prompt, default, input_stream, output):
+    while True:
+        answer = ask(prompt, input_stream, output).lower()
+        if not answer:
+            return default
+        if answer in ('y', 'yes', 'n', 'no'):
+            return answer in ('y', 'yes')
+        print('Please answer y/yes/n/no, or press Enter.', file=output)
+
+
+def install(repo, config_dir, unit_dir, args, run=subprocess.run, output=sys.stdout, errors=sys.stderr,
+            input_stream=sys.stdin):
+    server, enabled, non_interactive = arguments(args)
+    explicit = set(enabled)
+    interactive = input_stream.isatty() and output.isatty() and not non_interactive
     warn = lambda message: print('Warning: ' + message, file=errors)
     # A failed discovery contributes no partial stdout, and never removes offline rooms.
     try:
@@ -143,7 +177,6 @@ def install(repo, config_dir, unit_dir, args, run=subprocess.run, output=sys.std
                 else:
                     warn(f'Cannot represent discovered room {name!r} in the config; skipping it.')
 
-    config_dir.mkdir(parents=True, exist_ok=True)
     config = config_dir / 'config'
     legacy = config_dir / 'rooms'
     migrated = config_dir / 'rooms.migrated'
@@ -159,7 +192,55 @@ def install(repo, config_dir, unit_dir, args, run=subprocess.run, output=sys.std
         warn(f'{migrated} already exists; ignoring {legacy} (migration already completed).')
 
     original = read_text(config)
+    current_server = next((entry[1].strip() for line in original.splitlines()
+                           if (entry := setting(line)) and entry[0] == 'LMS_SERVER'), None)
+    if server is None and current_server is None:
+        try:
+            result = run(['./sonos-lms', '--find-server'], cwd=repo, capture_output=True, text=True)
+            server = result.stdout.strip() if result.returncode == 0 else ''
+            if not valid_server(server):
+                warn('Invalid discovered LMS host; leaving LMS_SERVER empty.')
+                server = ''
+        except OSError as error:
+            warn(f'LMS discovery failed ({error}); leaving LMS_SERVER empty.')
+            server = ''
     merged, new = merge_config(original, found, enabled, server)
+    rooms = parse_rooms(merged, warn)
+    if interactive:
+        try:
+            shown = server if server is not None else current_server
+            while True:
+                answer = ask(f'LMS server [{shown}]: ', input_stream, output)
+                if not answer:
+                    break
+                if valid_server(answer):
+                    server = answer
+                    break
+                print('Server must have no port, whitespace or control characters.', file=output)
+            answers = {}
+            for room in sorted(set(found) - explicit):
+                default = rooms[room]
+                answers[room] = ask_yes(f'Activate Sonos room "{room}"? '
+                                        + ('[Y/n] ' if default else '[y/N] '),
+                                        default, input_stream, output)
+            for room in sorted(set(rooms) - set(found)):
+                print(f'offline, kept: {room} ({"yes" if rooms[room] else "no"})', file=output)
+            merged, new = merge_config(original, found, enabled, server, answers)
+            print('Proposed changes:', file=output)
+            import difflib
+            changes = ''.join(difflib.unified_diff(original.splitlines(keepends=True),
+                              merged.splitlines(keepends=True), fromfile='current config',
+                              tofile='proposed config'))
+            print(changes or 'No config changes; apply configured room services.', file=output)
+            if migrate:
+                print('Migrate rooms to rooms.migrated.', file=output)
+            if not ask_yes('Apply? [Y/n] ', True, input_stream, output):
+                print('Cancelled; no changes applied.', file=output)
+                return
+        except (KeyboardInterrupt, EOFError):
+            print('\nCancelled; no changes applied.', file=output)
+            return
+    config_dir.mkdir(parents=True, exist_ok=True)
     if merged != original:
         atomic_write(config, merged)
     # Never retire the old list before all of its rooms have been persisted.
