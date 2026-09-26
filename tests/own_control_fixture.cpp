@@ -8,6 +8,23 @@
 #include <thread>
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
+    if (argc == 3 && std::string(argv[1]) == "--stopped-media-info") {
+        unsigned port = std::strtoul(argv[2], nullptr, 10);
+        const bool held = std::getenv("TEST_HELD_REQUEST") != nullptr;
+        upnp::OwnSpeakerControl control([] { return 1450; }, port, [held] { return upnp::StreamActivity{false, held}; });
+        assert(control.discover("Study", "127.0.0.1"));
+        const auto uri = control.transportInfo().uri;
+        for (const auto state : {"STOPPED", "PAUSED_PLAYBACK", "PLAYING"}) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1050));
+            control.poll();
+            assert(control.transportInfo().state == state);
+            assert(control.transportInfo().uri == uri);
+        }
+        std::string explicitUri;
+        assert(control.currentUri(explicitUri) && explicitUri == uri);
+        std::cout << "PASS: stopped MediaInfo experiment retains URI, resumes active polling and preserves explicit currentUri reads\n";
+        return 0;
+    }
     assert(argc == 2);
     unsigned port = std::strtoul(argv[1], nullptr, 10);
     upnp::OwnSpeakerControl control([] { return 1450; }, port);

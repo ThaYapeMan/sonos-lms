@@ -8,7 +8,13 @@ namespace upnp {
 OwnSpeakerControl::OwnSpeakerControl(std::function<unsigned()> port, unsigned controlPort,
                                      std::function<StreamActivity()> activity, std::function<void()> callback)
     : streamPort(std::move(port)), speakerPort(controlPort), streamActivity(std::move(activity)),
-      eventCallback(std::move(callback)) {}
+      eventCallback(std::move(callback)) {
+    const char* mode = std::getenv("SONOS_LMS_YENEY_STOPPED_MEDIAINFO");
+    stoppedMediaInfo = mode && std::string(mode) == "1";
+    if (mode && std::string(mode) != "0" && std::string(mode) != "1")
+        printf("Invalid SONOS_LMS_YENEY_STOPPED_MEDIAINFO; using 0\n");
+    printf("yeney stopped GetMediaInfo: %d (SONOS_LMS_YENEY_STOPPED_MEDIAINFO)\n", stoppedMediaInfo ? 1 : 0);
+}
 OwnSpeakerControl::~OwnSpeakerControl() { shutdownEvents(); }
 void OwnSpeakerControl::shutdownEvents() {
     { std::lock_guard<std::mutex> lock(eventMutex); eventsStopping = true; }
@@ -332,9 +338,11 @@ void OwnSpeakerControl::poll() {
         volumeAt = Clock::now() + std::chrono::seconds(1);
         std::string uri;
         const auto activity = streamActivity ? streamActivity() : StreamActivity{};
-        // A held paused GET can stall SOAP replies. Retain the last observed URI
-        // until the probe closes; transport-state polling still runs above.
-        if (!((info.state == "STOPPED" || info.state == "PAUSED_PLAYBACK") && activity.requestOpen))
+        bool isPaused;
+        { std::lock_guard<std::mutex> lock(cacheMutex); isPaused = paused(); }
+        // Mode 1 preserves the existing held-request guard. Mode 0 also skips
+        // idle paused reads, retaining the URI without changing explicit reads.
+        if (!isPaused || (stoppedMediaInfo && !activity.requestOpen))
             currentUri(uri);
         auto result = call("GetVolume", {{"InstanceID", "0"}, {"Channel", "Master"}}, "", "RenderingControl");
         const auto value = result.response.value("CurrentVolume");

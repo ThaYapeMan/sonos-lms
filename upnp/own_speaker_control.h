@@ -51,6 +51,7 @@ private:
     std::string sentTitle, sentUri, sentUrl;
     bool freshStreamPosition = false, pauseTimeoutLogged = false;
     bool positionKnown = false;
+    bool stoppedMediaInfo = false;
     uint64_t eventRevision = 0;
     std::function<void()> eventCallback;
     std::unique_ptr<GenaListener> eventListener;

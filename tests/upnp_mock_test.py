@@ -98,6 +98,8 @@ class Speaker(BaseHTTPRequestHandler):
             values = '<ZoneGroupState>' + escape(topology) + '</ZoneGroupState>'
         if action == 'GetTransportInfo':
             state = 'PLAYING'
+            if self.server.mode == 'stopped-media-info':
+                state = {2: 'STOPPED', 3: 'PAUSED_PLAYBACK'}.get(count, 'PLAYING')
             if self.server.mode == 'poll':
                 state = {3: 'PAUSED_PLAYBACK', 4: 'TRANSITIONING'}.get(count, 'PLAYING')
             if self.server.mode in ('get-first', 'event-first') and getattr(self.server, 'stopped', False): state = 'STOPPED'
@@ -355,3 +357,21 @@ with tempfile.TemporaryDirectory(prefix='sonos-gena-') as temp:
     for mode in ('event-first', 'get-first'):
         output = event_run(mode, [str(executable)])
         assert output.count('Device-initiated resume: current stream') == 1
+
+# Both modes keep transport polling running; only idle GetMediaInfo differs.
+previous = os.environ.get('SONOS_LMS_YENEY_STOPPED_MEDIAINFO')
+try:
+    for mode, held, expected in [(None, False, 3), ('0', False, 3), ('0', True, 3), ('1', False, 5), ('1', True, 3)]:
+        if mode is None: os.environ.pop('SONOS_LMS_YENEY_STOPPED_MEDIAINFO', None)
+        else: os.environ['SONOS_LMS_YENEY_STOPPED_MEDIAINFO'] = mode
+        if held: os.environ['TEST_HELD_REQUEST'] = '1'
+        else: os.environ.pop('TEST_HELD_REQUEST', None)
+        speaker = run('stopped-media-info', [str(ROOT / 'own-control-test'), '--stopped-media-info'])
+        assert speaker.counts['GetMediaInfo'] == expected, speaker.counts
+        assert speaker.counts['GetTransportInfo'] == 4, speaker.counts
+        assert f'yeney stopped GetMediaInfo: {mode or 0}' in speaker.output
+        print(f'PASS: STOPPED_MEDIAINFO={mode or "default"}, held={held}: STOPPED/PAUSED polling, active polling and explicit reads verified')
+finally:
+    os.environ.pop('TEST_HELD_REQUEST', None)
+    if previous is None: os.environ.pop('SONOS_LMS_YENEY_STOPPED_MEDIAINFO', None)
+    else: os.environ['SONOS_LMS_YENEY_STOPPED_MEDIAINFO'] = previous
