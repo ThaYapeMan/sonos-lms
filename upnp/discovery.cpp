@@ -82,7 +82,7 @@ std::vector<Speaker> parseTopology(const std::string& xml) {
             if (member.attribute("Invisible") == "1") continue;
             HttpUrl url;
             if (uuid.empty() || name.empty() || !parseHttpUrl(member.attribute("Location"), url) || !uuids.insert(uuid).second) return {};
-            members.push_back({url.host, uuid, name, "", {}});
+            members.push_back({url.host, uuid, name, "", {}, "", member.attribute("Location")});
         }
         if (coordinator.empty() || members.empty()) continue;
         std::vector<std::string> names;
@@ -95,6 +95,17 @@ std::vector<Speaker> parseTopology(const std::string& xml) {
         }
     }
     return result;
+}
+std::string deviceModel(const std::string& location) {
+    HttpUrl url;
+    if (!parseHttpUrl(location, url)) return {};
+    auto response = httpGet(url);
+    XmlNode root;
+    if (response.status != 200 || !response.error.empty() || !parseXml(response.body, root)) return {};
+    const auto device = root.name == "device" ? &root : root.child("device");
+    if (!device) return {};
+    auto name = device->value("displayName");
+    return name.empty() ? device->value("modelName") : name;
 }
 bool matchRoom(const std::vector<Speaker>& speakers, const std::string& room, Speaker& result) {
     const Speaker* selected = nullptr;

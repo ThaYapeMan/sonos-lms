@@ -1,6 +1,8 @@
 #include "noson_speaker_control.h"
 #include "noson_stream_server.h"
 #include "sonossystem.h"
+#include "discovery.h"
+#include <algorithm>
 #include <cstdio>
 namespace upnp {
 struct NosonSpeakerControl::Impl {
@@ -36,6 +38,30 @@ std::vector<std::string> NosonSpeakerControl::discoverRooms(const std::string& i
     if (!(ip.empty() ? impl->system.Discover() : impl->system.Discover("http://" + ip + ":1400"))) return {};
     std::vector<std::string> rooms;
     for (const auto& entry : impl->system.GetZonePlayerList()) rooms.push_back(*entry.second);
+    return rooms;
+}
+std::vector<Speaker> NosonSpeakerControl::discoverRoomDetails(const std::string& ip) {
+    if (!(ip.empty() ? impl->system.Discover() : impl->system.Discover("http://" + ip + ":1400"))) return {};
+    std::vector<Speaker> rooms;
+    const auto zones = impl->system.GetZoneList();
+    for (const auto& entry : impl->system.GetZonePlayerList()) {
+        const auto player = entry.second;
+        Speaker room{player->GetHost(), player->GetUUID(), *player, "", {}};
+        room.location = player->GetLocation();
+        room.model = deviceModel(room.location);
+        for (const auto& zone : zones) {
+            bool contains = false;
+            for (const auto& member : *zone.second) if (member->GetUUID() == room.uuid) contains = true;
+            if (!contains) continue;
+            room.coordinator = *zone.second->GetCoordinator();
+            for (const auto& member : *zone.second) room.members.push_back(*member);
+            std::sort(room.members.begin(), room.members.end());
+            const auto c = std::find(room.members.begin(), room.members.end(), room.coordinator);
+            if (c != room.members.end()) std::rotate(room.members.begin(), c, c + 1);
+            break;
+        }
+        rooms.push_back(room);
+    }
     return rooms;
 }
 Speaker NosonSpeakerControl::speaker() const { return impl->speaker; }

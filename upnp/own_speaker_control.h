@@ -10,6 +10,7 @@ public:
     explicit OwnSpeakerControl(std::function<unsigned()> streamPort, unsigned speakerPort = 1400);
     bool discover(const std::string&, const std::string& = {}) override;
     std::vector<std::string> discoverRooms(const std::string& = {}) override;
+    std::vector<Speaker> discoverRoomDetails(const std::string& = {}) override;
     Speaker speaker() const override;
     bool playStream(const std::string&, const std::string&, const std::string& = {}) override;
     bool play() override;

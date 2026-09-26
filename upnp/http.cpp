@@ -62,7 +62,7 @@ bool parseHttpUrl(const std::string& input, HttpUrl& out) {
     out.path = slash == std::string::npos ? "/" : input.substr(slash);
     return true;
 }
-HttpResponse httpPost(const HttpUrl& url, const std::map<std::string, std::string>& headers,
+static HttpResponse request(const std::string& method, const HttpUrl& url, const std::map<std::string, std::string>& headers,
                       const std::string& body, unsigned timeoutMs) {
     HttpResponse result;
     try {
@@ -85,7 +85,7 @@ HttpResponse httpPost(const HttpUrl& url, const std::map<std::string, std::strin
             char address[INET_ADDRSTRLEN];
             if (inet_ntop(AF_INET, &local.sin_addr, address, sizeof(address))) result.localAddress = address;
         }
-        std::string request = "POST " + url.path + " HTTP/1.1\r\nHost: " + url.host + ":" + std::to_string(url.port)
+        std::string request = method + " " + url.path + " HTTP/1.1\r\nHost: " + url.host + ":" + std::to_string(url.port)
             + "\r\nConnection: close\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
         for (const auto& h : headers) {
             if (h.first.find_first_of(":\r\n") != std::string::npos || h.second.find_first_of("\r\n") != std::string::npos)
@@ -170,4 +170,12 @@ HttpResponse httpPost(const HttpUrl& url, const std::map<std::string, std::strin
     } catch (const std::runtime_error& error) { result.error = error.what(); result.body.clear(); }
     return result;
 }
+HttpResponse httpPost(const HttpUrl& url, const std::map<std::string, std::string>& headers,
+                      const std::string& body, unsigned timeoutMs) {
+    return request("POST", url, headers, body, timeoutMs);
+}
+HttpResponse httpGet(const HttpUrl& url, unsigned timeoutMs) {
+    return request("GET", url, {}, "", timeoutMs);
+}
+
 }

@@ -769,7 +769,7 @@ static int findServerCommand()
 
 // Keep stdout machine-readable even when the selected backend logs discovery.
 // Complete backend destruction while diagnostics are still redirected.
-static int listRoomsCommand(const std::string& ip, int debug)
+static int listRoomsCommand(const std::string& ip, int debug, bool details)
 {
     fflush(stdout);
     const int outputFd = dup(STDOUT_FILENO);
@@ -783,11 +783,11 @@ static int listRoomsCommand(const std::string& ip, int debug)
     try {
         if (upnp::backend() == upnp::Backend::Own) {
             upnp::OwnSpeakerControl control([] { return 0u; });
-            result = upnp::listRooms(control, ip, rooms, std::cerr);
+            result = upnp::listRooms(control, ip, rooms, std::cerr, details);
         } else {
             upnp::NosonStreamServer server(debug, nullptr);
             upnp::NosonSpeakerControl control(server, nullptr);
-            result = upnp::listRooms(control, ip, rooms, std::cerr);
+            result = upnp::listRooms(control, ip, rooms, std::cerr, details);
         }
     } catch (const std::exception& error) {
         fprintf(stderr, "Room discovery failed: %s\n", error.what());
@@ -809,7 +809,7 @@ int main(int argc, char** argv)
     if (findFlag(argc, argv, "--find-server")) return findServerCommand();
     if (findFlag(argc, argv, "--list-rooms")) {
         const auto ip = findOption(argc, argv, "--ip");
-        return listRoomsCommand(ip ? ip : "", findFlag(argc, argv, "--debug") ? 4 : 0);
+        return listRoomsCommand(ip ? ip : "", findFlag(argc, argv, "--debug") ? 4 : 0, findFlag(argc, argv, "--details"));
     }
     (void)pauseMode();
     const auto backend = upnp::backend();

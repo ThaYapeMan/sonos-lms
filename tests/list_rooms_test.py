@@ -23,6 +23,16 @@ class Speaker(BaseHTTPRequestHandler):
 
     do_UNSUBSCRIBE = do_SUBSCRIBE
 
+    def do_GET(self):
+        models = {'/study.xml': '<displayName>Play:1</displayName><modelName>Sonos Play:1</modelName>',
+                  '/port.xml': '<modelName>Port</modelName>'}
+        body = ('<root><device>' + models.get(self.path, '') + '</device></root>').encode()
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         self.rfile.read(int(self.headers['Content-Length']))
         action = self.headers['SOAPAction'].strip('"').split('#')[1]
@@ -75,6 +85,21 @@ try:
             assert 'GetZoneGroupState' in server.actions, server.actions
             assert set(server.actions) <= {'GetZoneGroupState', 'GetHouseholdID', 'GetZoneInfo', 'ListAvailableServices'}, server.actions
             print(f'PASS: --list-rooms backend={backend or "default"} empty={empty}: exact sorted unique rooms, group member, --ip, exit status and clean stdout')
+    topology = (ROOT / 'tests/fixtures/topology.xml').read_text()
+    for ip, path in (('1', 'study'), ('2', 'port'), ('3', 'unknown'), ('4', 'bonded')):
+        topology = topology.replace(f'127.0.0.{ip}:1400/xml/device_description.xml', f'127.0.0.8:1400/{path}.xml')
+    topology = topology.replace('ZoneName="Study"/>', 'ZoneName="Study"><Satellite UUID="SUB" ZoneName="Sub" Location="http://127.0.0.8:1400/sub.xml"/></ZoneGroupMember>')
+    expected = ('Living & Dining\t-\t127.0.0.8\tLiving & Dining\tLiving & Dining\n'
+                'Sonos Port\tPort\t127.0.0.8\tStudy\tStudy,Sonos Port\n'
+                'Study\tPlay:1\t127.0.0.8\tStudy\tStudy,Sonos Port\n')
+    for backend in ('own', 'noson'):
+        server.topology = topology
+        result = subprocess.run([str(ROOT / 'sonos-lms'), '--list-rooms', '--details', '--ip=127.0.0.8'],
+                                env=dict(os.environ, SONOS_LMS_UPNP=backend), capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0 and result.stdout == expected, result
+        print(f'PASS: --list-rooms --details backend={backend}: model fallback, unknown model, groups, room device and satellites')
+    Path('/tmp/sonos-room-details.txt').write_text(result.stdout)
+
 finally:
     server.shutdown()
     server.server_close()

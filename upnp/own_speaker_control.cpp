@@ -90,6 +90,18 @@ std::vector<std::string> OwnSpeakerControl::discoverRooms(const std::string& see
     }
     return rooms;
 }
+std::vector<Speaker> OwnSpeakerControl::discoverRoomDetails(const std::string& seed) {
+    auto locations = seed.empty() ? discoverSsdp() : std::vector<HttpUrl>{{seed, "/", speakerPort}};
+    for (const auto& location : locations) {
+        auto result = call("GetZoneGroupState", {}, location.host, "ZoneGroupTopology");
+        if (!result.ok) continue;
+        auto rooms = parseTopology(result.response.value("ZoneGroupState"));
+        if (rooms.empty()) continue;
+        for (auto& room : rooms) room.model = deviceModel(room.location);
+        return rooms;
+    }
+    return {};
+}
 bool OwnSpeakerControl::playStream(const std::string& url, const std::string& title, const std::string& art) {
     if (url.find(':') == std::string::npos) return false;
     const auto metadata = streamDidl(url, title, art);
