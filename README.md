@@ -337,6 +337,14 @@ scenarios 1–7, three S2 rounds and a 120-second long pause. AUTO requires Pyth
 access and the room's journal; run it from the repository directory. The bridge
 logs `speaker URI: stream=N session=<token>` independently of the displayed title.
 Unknown or external URIs do not count as successful stream detection in AUTO.
+For idle diagnostics, run `AUTO=1 SCENARIOS="8" IDLE_SECS=120`: S8 plays track A,
+stops LMS and records stream GETs without sending Play. It passes only if Sonos
+and LMS remain stopped. S8 is not included by default. Repeated scenarios such as
+`SCENARIOS="7 7 7"` have separate results and monitor logs (`S7#1`, `S7#2`, `S7#3`).
+The script records the running bridge's UPnP layer from its current service
+invocation. Packet captures include all traffic to/from the discovered speaker
+coordinator (`SONOS_IP` overrides it), including stream and GENA ports, with a
+512-byte snaplen; Slimproto traffic is also retained.
 Agents never SSH to or deploy on LXC 113; the owner runs physical tests there.
 
 ## Where it falls short
@@ -467,7 +475,15 @@ in-flight polls cannot overwrite them. Subscriptions renew halfway through the
 granted timeout, follow coordinator changes, and unsubscribe on clean shutdown.
 Subscription failures are logged and leave polling available. The separate event
 listener uses an ephemeral TCP port on `0.0.0.0`; set `SONOS_LMS_EVENT_PORT` to
-choose a fixed callback port.
+choose a fixed callback port, for example `Environment=SONOS_LMS_EVENT_PORT=1403`
+in the unit override when taking packet captures.
+
+**Stopped polling experiment.** `SONOS_LMS_YENEY_STOPPED_MEDIAINFO=0` (default)
+skips periodic `GetMediaInfo` while STOPPED or PAUSED_PLAYBACK and retains the last
+known URI. Set it to `1` to restore the previous polling behavior (which still
+skips the call while a paused stream request is open). The mode is read and logged
+at startup. Explicit URI checks, transport polling, resume handling and the noson
+backend are unchanged.
 
 See [the UPnP layer inventory and wire fixtures](docs/upnp-layer.md). No SMAPI
 library service or external-playback ownership policy is enabled by this switch.
