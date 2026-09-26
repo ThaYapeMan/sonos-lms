@@ -125,38 +125,60 @@ Taking over "Living Room" (MAC 34:7E:5C:1A:90:20) ... connected to LMS
 
 ### Installing room services
 
-From the deployment checkout at `/opt/sonos-lms` (the installer needs root and
-Python 3), discover the speakers, edit the config, then apply it:
+From the deployment checkout at `/opt/sonos-lms` (root and Python 3 required), run
+`make` then `sudo make install`. On a terminal, the installer asks for the LMS
+server and every discovered room, then shows the changes for approval. Enter keeps
+the displayed default; Ctrl-C or answering `n` at Apply leaves files and services
+untouched. An example session:
 
-```sh
-make
-sudo make install
-sudoedit /etc/sonos-lms/config
-sudo make install
+```text
+LMS server [lms.example]:
+Activate Sonos room "Kitchen"? [y/N] n
+Activate Sonos room "Sonos Port"? [y/N] y
+Activate Sonos room "Study"? [y/N] y
+Proposed changes:
+... config diff ...
+Apply? [Y/n]
 ```
 
-Example config:
+Resulting `/etc/sonos-lms/config`:
 
 ```ini
-LMS_SERVER=<host>
+# LMS host or IP (no port). Empty = automatic discovery on the local network.
+LMS_SERVER=lms.example
 # Sonos rooms found on the network.
 # yes = bridge this room to LMS, no = ignore it.
-room.Study=yes
-room.Sonos Port=yes
 room.Kitchen=no
+room.Sonos Port=yes
+room.Study=yes
 ```
 
-New speakers are added as `no`; existing values and offline speakers' lines are
-kept. Set a room to `yes` and run `make install` to enable/start it (or restart it
-if already running). To remove a room's bridge, set it to `no` and run `make install`
-to stop and disable its service. If discovery fails, configured rooms are still
-applied. An old `/etc/sonos-lms/rooms` file is migrated once to enabled settings
-and renamed `rooms.migrated`.
+If `LMS_SERVER` is missing, the installer discovers and records the host, or writes
+an empty value when no server answers. Existing values are kept unless you answer
+the LMS prompt or pass `--server=<host>`. Hosts must have no port, whitespace or
+control characters.
 
-`LMS_SERVER` is optional: omit or empty it for automatic LMS discovery.
-`scripts/install-devices.sh --server=<host>` still saves this override; quoted room
-arguments, such as `scripts/install-devices.sh "Sonos Port"`, set those rooms to
-`yes`. Existing comments and unrelated settings are preserved.
+Alternatively, edit the config with `sudoedit /etc/sonos-lms/config`, then run
+`sudo make install` and accept its defaults, or apply without prompts using
+`sudo scripts/install-devices.sh --non-interactive`. Set a room to `yes` to
+start/enable it (restart if already running), or `no` to stop/disable it.
+Offline rooms retain their lines and are reported without questions. If discovery
+fails, configured rooms are still applied. The old `rooms` file migrates once to
+enabled settings and is renamed `rooms.migrated` after approval.
+
+Installer flags (for `scripts/install-devices.sh`):
+
+| Option | Behaviour |
+| --- | --- |
+| `--yes` | Apply without prompts; keep existing room values and add new rooms as `no`. |
+| `--non-interactive` | Same as `--yes`; also automatic when stdin or stdout is not a TTY. |
+| `--reconfigure` | Explicit alias for the normal interactive flow: ask about every discovered room, even when nothing is new. Requires a TTY; non-interactive flags take precedence. |
+| `--server=<host>` | Override the saved LMS server. |
+
+Quoted room arguments, such as `sudo scripts/install-devices.sh "Sonos Port"`,
+set those rooms to `yes` without asking about them. Comments, ordering, unrelated
+settings and offline room lines are preserved. Automated `make install` with no
+TTY never prompts; new speakers default to `no`.
 
 ## Testing
 
