@@ -24,17 +24,22 @@ class Commands:
     def __init__(self, rooms='Study\nSonos Port\nKitchen\n', discovery_status=0):
         self.rooms, self.discovery_status = rooms, discovery_status
         self.server = ''
+        self.build = 'build-a'
+        self.details = None
         self.calls = []
         self.active, self.enabled, self.missing = set(), set(), set()
 
     def __call__(self, args, **kwargs):
         self.calls.append(args)
-        if args == ['./sonos-lms', '--list-rooms']:
+        if args == ['./sonos-lms', '--list-rooms', '--details']:
             assert kwargs['cwd'] == ROOT
-            return subprocess.CompletedProcess(args, self.discovery_status, self.rooms,
+            return subprocess.CompletedProcess(args, self.discovery_status, self.details if self.details is not None else ''.join(name + '\t-\t-\t-\t-\n' for name in self.rooms.splitlines()),
                                                'No Sonos rooms found.' if self.discovery_status else '')
         if args == ['./sonos-lms', '--find-server']:
             return subprocess.CompletedProcess(args, 0 if self.server else 2, self.server, '')
+        if args[0] == 'git':
+            value = '' if args[1] == 'status' else self.build
+            return subprocess.CompletedProcess(args, 0, value + '\n', '')
         if args[0] == 'systemd-escape':
             return subprocess.run(args, **kwargs)
         assert args[0] == 'systemctl', args
@@ -43,7 +48,9 @@ class Commands:
         if action == 'is-active': code = 0 if unit in self.active else 3
         elif action == 'is-enabled': code = 0 if unit in self.enabled else 1
         elif action == 'show': output = 'not-found\n' if unit in self.missing else 'loaded\n'
-        elif action == 'enable': self.enabled.add(unit); self.active.add(unit)
+        elif action == 'enable':
+            self.enabled.add(unit)
+            if '--now' in args: self.active.add(unit)
         elif action == 'restart': self.active.add(unit)
         elif action == 'stop': self.active.discard(unit)
         elif action == 'disable': self.enabled.discard(unit)
@@ -53,6 +60,19 @@ class Commands:
     def actions(self):
         return [args for args in self.calls if args[0] == 'systemctl'
                 and args[1] in ('enable', 'restart', 'stop', 'disable')]
+
+
+def mock_lms(host, rooms):
+    # Exercise the real parser/polling code with an in-memory CLI socket.
+    class Socket:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def settimeout(self, value): pass
+        def sendall(self, value): assert value == b'players 0 999\n'
+        def recv(self, size):
+            from urllib.parse import quote
+            return ('players 0 999 ' + ' '.join(f'playerindex%3A{i} name%3A{quote(room + " (Sonos)")} connected%3A1' for i, room in enumerate(rooms)) + '\n').encode()
+    return installer.check_lms(host, rooms, connect=lambda *a, **k: Socket())
 
 
 class InstallerTests(unittest.TestCase):
@@ -67,7 +87,7 @@ class InstallerTests(unittest.TestCase):
 
     def run_install(self, runner=None, args=()):
         runner = runner or Commands()
-        installer.install(ROOT, self.config_dir, self.unit_dir, args, runner, self.out, self.err)
+        installer.install(ROOT, self.config_dir, self.unit_dir, args, runner, self.out, self.err, lms_check=mock_lms)
         return runner
 
     def test_parsing_exact_names_boolean_aliases_and_comments(self):
@@ -101,7 +121,7 @@ class InstallerTests(unittest.TestCase):
                          + 'room.Kitchen=no\nroom.Sonos Port=no\nroom.Study=no\n')
         self.assertFalse(runner.enabled)
         self.assertFalse(runner.active)
-        self.assertEqual(self.out.getvalue().count('New rooms found:'), 3)
+        self.assertEqual(self.out.getvalue().count('New rooms added as no:'), 1)
 
     def test_active_not_enabled_and_inactive_enabled(self):
         self.config.write_text('room.Study=yes\nroom.Sonos Port=on\n')
@@ -110,9 +130,9 @@ class InstallerTests(unittest.TestCase):
         runner.enabled.add(r'sonos-lms@Sonos\x20Port.service')
         self.run_install(runner)
         self.assertEqual(runner.actions(), [
-            ['systemctl', 'enable', '--now', 'sonos-lms@Study.service'],
-            ['systemctl', 'restart', 'sonos-lms@Study.service'],
+            ['systemctl', 'enable', 'sonos-lms@Study.service'],
             ['systemctl', 'enable', '--now', r'sonos-lms@Sonos\x20Port.service'],
+            ['systemctl', 'restart', 'sonos-lms@Study.service'],
         ])
 
     def test_migration_new_rooms_and_apply_plan(self):
@@ -128,15 +148,13 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse(legacy.exists())
         self.assertEqual((self.config_dir / 'rooms.migrated').read_text(), 'Study\nSonos Port\n')
         self.assertEqual(runner.actions(), [
-            ['systemctl', 'stop', 'sonos-lms@Kitchen.service'],
-            ['systemctl', 'disable', 'sonos-lms@Kitchen.service'],
             ['systemctl', 'enable', '--now', r'sonos-lms@Sonos\x20Port.service'],
             ['systemctl', 'restart', 'sonos-lms@Study.service'],
         ])
-        self.assertIn('Study: enabled (running)', self.out.getvalue())
-        self.assertIn('Sonos Port: enabled (running)', self.out.getvalue())
-        self.assertIn('Kitchen: disabled', self.out.getvalue())
-        self.assertIn('New rooms found: Kitchen — set room.Kitchen=yes', self.out.getvalue())
+        self.assertRegex(self.out.getvalue(), r'Study +running +LMS player')
+        self.assertRegex(self.out.getvalue(), r'Sonos Port +running +LMS player')
+        self.assertRegex(self.out.getvalue(), r'Kitchen +disabled')
+        self.assertIn('New rooms added as no: Kitchen — edit', self.out.getvalue())
         self.assertNotIn('New rooms found: Study', self.out.getvalue())
         # Once migrated, editing no must survive subsequent runs.
         self.config.write_text(self.config.read_text().replace('room.Study=yes', 'room.Study=no'))
@@ -163,7 +181,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(runner.actions(), [['systemctl', 'enable', '--now', 'sonos-lms@Offline.service']])
         self.assertIn('Room discovery failed', self.err.getvalue())
         self.assertNotIn('Spurious', self.config.read_text())
-        self.assertIn('Kitchen: disabled', self.out.getvalue())
+        self.assertRegex(self.out.getvalue(), r'Kitchen +disabled')
 
     def test_empty_discovery_and_absent_config(self):
         self.run_install(Commands(''))
@@ -231,7 +249,7 @@ class InstallerTests(unittest.TestCase):
             def isatty(self): return True
         self.out = TTY()
         installer.install(ROOT, self.config_dir, self.unit_dir, args, runner,
-                          self.out, self.err, TTY(answers))
+                          self.out, self.err, TTY(answers), lms_check=mock_lms)
         return runner
 
     def test_lms_found_empty_existing_and_override(self):
@@ -244,15 +262,15 @@ class InstallerTests(unittest.TestCase):
             self.config.write_text(f'LMS_SERVER={host}\n')
             runner = self.run_install()
             self.assertTrue(self.config.read_text().startswith(f'LMS_SERVER={host}\n'))
-            self.assertNotIn(['./sonos-lms', '--find-server'], runner.calls)
+            self.assertIn(['./sonos-lms', '--find-server'], runner.calls)
         self.run_install(args=('--server=override',))
         self.assertIn('LMS_SERVER=override', self.config.read_text())
 
     def test_interactive_answers_validation_defaults_and_offline(self):
         self.config.write_text('# keep\nLMS_SERVER=old\nroom.Study=ON\nroom.Offline= true \nOTHER=unchanged\n')
-        self.interactive('bad:9000\nbad host\nbad\x01host\nnew.example\nmaybe\ny\nn\n\n\n')
+        self.interactive('bad:9000\nbad host\nbad\x01host\nnew.example\nmaybe\ny\nn\ny\n\n\n')
         self.assertEqual(self.config.read_text(), '# keep\nLMS_SERVER=new.example\nroom.Study=yes\nroom.Offline= true \nOTHER=unchanged\nroom.Kitchen=yes\nroom.Sonos Port=no\n')
-        self.assertIn('offline, kept: Offline (yes)', self.out.getvalue())
+        self.assertRegex(self.out.getvalue(), r'Offline +.*offline, yes')
         self.assertIn('"Study"? [Y/n]', self.out.getvalue())
         self.assertEqual(self.out.getvalue().count('LMS server [old]:'), 4)
         self.assertEqual(self.out.getvalue().count('"Kitchen"? [y/N]'), 2)
@@ -271,7 +289,8 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(self.config.read_text(), original)
             self.assertTrue(legacy.exists())
             self.assertFalse(self.unit_dir.exists())
-            self.assertFalse(any(call[0] == 'systemctl' for call in runner.calls))
+            self.assertFalse(runner.actions())
+            self.assertFalse((self.config_dir / 'installed-build').exists())
 
     def test_flags_no_tty_and_explicit_room(self):
         for args in (('--yes',), ('--non-interactive',), ('--yes', '--reconfigure')):
@@ -286,21 +305,171 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn('"Study"?', self.out.getvalue())
         self.assertIn('room.Study=yes', self.config.read_text())
 
+    def test_details_table_groups_unknown_new_and_offline(self):
+        warnings = []
+        found = installer.parse_details('Study\tPlay:1\t192.0.2.1\tStudy\tStudy,Sonos Port\n'
+                                        'Sonos Port\tPort\t192.0.2.2\tStudy\tStudy,Sonos Port\n'
+                                        'Kitchen\t-\t-\t-\t-\ninvalid\n', warnings.append)
+        states = {'Study': ('unit', True, True), 'Sonos Port': ('unit', False, True),
+                  'Offline': ('unit', False, False), 'Kitchen': ('unit', False, False)}
+        installer.room_table(found, {'Study': True, 'Sonos Port': True, 'Offline': False}, states, self.out)
+        text = self.out.getvalue()
+        self.assertIn('Sonos rooms found: 3, offline: 1', text)
+        self.assertIn('coordinator: Study+Sonos Port', text)
+        self.assertIn('member of Study', text)
+        self.assertRegex(text, r'Kitchen +- +- +- +new')
+        self.assertRegex(text, r'Offline +.*offline, no')
+        self.assertIn('yes, stopped', text)
+        self.assertEqual(len(warnings), 1)
+
+    def test_plan_build_server_force_stop_and_nothing(self):
+        runner = Commands('Study\n')
+        self.config.write_text('LMS_SERVER=host\nroom.Study=yes\n')
+        self.run_install(runner)
+        self.assertEqual(len(runner.actions()), 1)
+        for kind in ('same', 'different', 'binary', 'missing', 'server', 'forced', 'stop'):
+            runner.calls.clear(); self.out = io.StringIO()
+            args = ()
+            if kind == 'different': runner.build = 'build-b'
+            if kind == 'binary':
+                stamp = self.config_dir / 'installed-build'
+                stamp.write_text(stamp.read_text().replace('sha256=', 'sha256=changed'))
+            if kind == 'missing': (self.config_dir / 'installed-build').unlink()
+            if kind == 'server': args = ('--server=other',)
+            if kind == 'forced': args = ('--restart',)
+            if kind == 'stop': self.config.write_text('LMS_SERVER=other\nroom.Study=no\n')
+            self.run_install(runner, args)
+            text = self.out.getvalue()
+            if kind == 'same':
+                self.assertIn('Keep:    Study', text)
+                self.assertIn('Nothing to do.', text)
+                self.assertFalse(runner.actions())
+                self.assertIn('LMS player "Study (Sonos)" connected', text)
+            elif kind == 'stop':
+                self.assertIn('Stop:    Study', text)
+                self.assertEqual([a[1] for a in runner.actions()], ['stop', 'disable'])
+            else:
+                self.assertEqual([a[1] for a in runner.actions()], ['restart'])
+                expected = 'forced' if kind == 'forced' else 'LMS server changed' if kind == 'server' else 'new build build-b'
+                self.assertIn(expected, text)
+                self.assertIn('; playback stops briefly', text)
+
+    def test_installed_build_atomic_and_service_failure(self):
+        runner = Commands('Study\n')
+        self.config.write_text('LMS_SERVER=host\nroom.Study=yes\n')
+        self.run_install(runner)
+        stamp = self.config_dir / 'installed-build'
+        original = stamp.read_text()
+        self.assertEqual(original, installer.build_identity(ROOT, runner)[1])
+        runner.build = 'next'
+        def failing(args, **kwargs):
+            if args[:2] == ['systemctl', 'restart']:
+                raise subprocess.CalledProcessError(1, args)
+            return runner(args, **kwargs)
+        with self.assertRaises(subprocess.CalledProcessError): self.run_install(failing)
+        self.assertEqual(stamp.read_text(), original)
+        replace = os.replace
+        writes = []
+        def observe(source, dest):
+            if dest == stamp:
+                self.assertEqual(stamp.read_text(), original)
+                self.assertEqual(Path(source).parent, stamp.parent)
+                self.assertIn('sha256=', Path(source).read_text())
+                writes.append(dest)
+            return replace(source, dest)
+        with patch.object(installer.os, 'replace', side_effect=observe): self.run_install(runner)
+        self.assertEqual(writes, [stamp])
+        self.assertEqual(stamp.read_text(), installer.build_identity(ROOT, runner)[1])
+        self.assertFalse(list(self.config_dir.glob('.install.*')))
+
+    def test_selection_later_new_reconfigure_and_no_apply_on_noop(self):
+        runner = Commands('Study\nSonos Port\n')
+        self.config.write_text('LMS_SERVER=host\nroom.Study=yes\nroom.Sonos Port=no\n')
+        self.run_install(runner)
+        runner.calls.clear()
+        self.interactive('\n\n', runner)
+        text = self.out.getvalue()
+        self.assertIn('Change which rooms are bridged? [y/N]', text)
+        self.assertNotIn('Activate Sonos room', text)
+        self.assertNotIn('Apply?', text)
+        self.assertFalse(runner.actions())
+        runner.rooms += 'Kitchen\n'
+        self.interactive('\ny\n\n\n', runner)
+        text = self.out.getvalue()
+        self.assertIn('"Kitchen"? [y/N]', text)
+        self.assertIn('Change other rooms? [y/N]', text)
+        self.assertNotIn('"Study"?', text)
+        self.assertNotIn('New rooms', text)
+        self.interactive('\n\n\n\n', runner, ('--reconfigure',))
+        self.assertEqual(self.out.getvalue().count('Activate Sonos room'), 3)
+        self.assertNotIn('Change which', self.out.getvalue())
+
+    def test_lms_sources_and_mismatch(self):
+        runner = Commands('Study\n'); runner.server = 'found'
+        self.run_install(runner)
+        self.assertIn('LMS server: found (discovery)', self.out.getvalue())
+        self.config.write_text('LMS_SERVER=saved\nroom.Study=no\n')
+        self.out = io.StringIO()
+        self.run_install(runner)
+        self.assertIn('LMS server: saved (config)', self.out.getvalue())
+        self.assertIn('LMS config is saved; discovery found found', self.err.getvalue())
+        self.out = io.StringIO(); self.run_install(runner, ('--server=override',))
+        self.assertIn('LMS server: override (--server)', self.out.getvalue())
+        self.config.unlink(); runner.server = ''; self.out = io.StringIO()
+        self.run_install(runner)
+        self.assertIn('LMS server: - (none)', self.out.getvalue())
+
+    def test_lms_cli_encoding_timeout_unreachable_and_shared_deadline(self):
+        response = 'players 0 999 count%3A2 playerindex%3A0 name%3ASonos%20Port%20%28Sonos%29 connected%3A1 playerindex%3A1 name%3AStudy%20%28Sonos%29 connected%3A0'
+        self.assertEqual(installer.connected_players(response), {'Sonos Port (Sonos)'})
+        self.assertEqual(installer.connected_players('players 0 999 playerindex:0 name:A%2BB%3A%20C connected:1'), {'A+B: C'})
+        class Socket:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def settimeout(self, value): pass
+            def sendall(self, value): assert value == b'players 0 999\n'
+            def recv(self, size): return (response + '\n').encode()
+        start = time.monotonic()
+        checks, skipped = installer.check_lms('host', ['Sonos Port', 'Study', 'Other'], timeout=0.03,
+                                             connect=lambda *a, **k: Socket())
+        self.assertLess(time.monotonic() - start, 0.3)
+        self.assertFalse(skipped)
+        self.assertIn('connected', checks['Sonos Port'])
+        self.assertIn('not seen after 0.03 s', checks['Study'])
+        self.assertIn('not seen after 0.03 s', checks['Other'])
+        def unreachable(*args, **kwargs): raise OSError('connection refused')
+        self.assertIn('port 9090 unreachable', installer.check_lms('host', ['Study'], connect=unreachable)[1])
+        self.assertEqual(installer.check_lms('', ['Study'])[1], 'no LMS host known')
+        # Even a resolver ignoring socket timeout cannot hold the caller up.
+        def stalled(*args, **kwargs):
+            time.sleep(0.1)
+            raise OSError('resolver stalled')
+        start = time.monotonic()
+        installer.check_lms('host', ['Study'], timeout=0.02, connect=stalled)
+        self.assertLess(time.monotonic() - start, 0.08)
+
     def test_real_tty_session_and_yes(self):
-        for non_interactive in (False, True):
-            self.config.unlink(missing_ok=True)
+        for case in ('first', 'same', 'new', 'yes'):
+            base = Path(self.temp.name) / case
             master, slave = pty.openpty()
             process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
-                                        '--pty-child', self.temp.name]
-                                       + (['--yes'] if non_interactive else []),
+                                        '--pty-child', str(base), case],
                                        stdin=slave, stdout=slave, stderr=slave)
             os.close(slave)
             transcript = b''
-            prompts = [(b'LMS server [lms.example]: ', b'\n'),
-                       (b'Activate Sonos room "Kitchen"? [y/N] ', b'n\n'),
-                       (b'Activate Sonos room "Sonos Port"? [y/N] ', b'y\n'),
-                       (b'Activate Sonos room "Study"? [y/N] ', b'y\n'),
-                       (b'Apply? [Y/n] ', b'\n')] if not non_interactive else []
+            prompts = [(b'LMS server [lms.example]: ', b'\n')]
+            if case == 'first':
+                prompts += [(b'Activate Sonos room "Kitchen"? [y/N] ', b'n\n'),
+                            (b'Activate Sonos room "Sonos Port"? [y/N] ', b'y\n'),
+                            (b'Activate Sonos room "Study"? [y/N] ', b'y\n'),
+                            (b'Apply? [Y/n] ', b'\n')]
+            elif case == 'same':
+                prompts += [(b'Change which rooms are bridged? [y/N] ', b'\n')]
+            elif case == 'new':
+                prompts += [(b'Activate Sonos room "MBR"? [y/N] ', b'y\n'),
+                            (b'Change other rooms? [y/N] ', b'\n'),
+                            (b'Apply? [Y/n] ', b'\n')]
+            else: prompts = []
             deadline = time.monotonic() + 10
             try:
                 while time.monotonic() < deadline:
@@ -311,21 +480,30 @@ class InstallerTests(unittest.TestCase):
                         transcript += chunk
                         if prompts and prompts[0][0] in transcript:
                             os.write(master, prompts.pop(0)[1])
-                    elif process.poll() is not None:
-                        break
-                self.assertEqual(process.wait(timeout=1), 0)
+                    elif process.poll() is not None: break
+                self.assertEqual(process.wait(timeout=1), 0, transcript.decode())
                 self.assertFalse(prompts)
             finally:
-                if process.poll() is None:
-                    process.kill(); process.wait()
+                if process.poll() is None: process.kill(); process.wait()
                 os.close(master)
             text = transcript.decode().replace('\r\n', '\n')
-            Path('/tmp/sonos-installer-' + ('yes' if non_interactive else 'interactive') + '.txt').write_text(text)
+            Path('/tmp/sonos-plan-' + case + '.txt').write_text(text)
             self.assertIn(installer.LMS_COMMENT + 'LMS_SERVER=lms.example', text)
-            self.assertIn('room.Sonos Port=' + ('no' if non_interactive else 'yes'), text)
-            self.assertIn('room.Study=' + ('no' if non_interactive else 'yes'), text)
-            if non_interactive:
+            self.assertIn('room.Sonos Port=yes', text)
+            if case == 'same':
+                self.assertNotIn('Activate Sonos room', text)
                 self.assertNotIn('Apply?', text)
+                self.assertNotIn('Restart:', text)
+                self.assertIn('Keep:    Sonos Port, Study', text)
+                self.assertIn('Nothing to do.', text)
+            if case in ('new', 'yes'):
+                self.assertIn('Restart: Sonos Port, Study (new build build-b); playback stops briefly', text)
+                self.assertIn('room.MBR=' + ('yes' if case == 'new' else 'no'), text)
+            if case == 'yes':
+                self.assertNotIn('Apply?', text)
+                self.assertIn('New rooms added as no: MBR', text)
+            else:
+                self.assertNotIn('New rooms added as no:', text)
 
     def test_enter_keeps_found_server_and_room_defaults(self):
         runner = Commands(); runner.server = 'found.example'
@@ -343,7 +521,7 @@ def dry_run_report():
         (config_dir / 'config').write_text('LMS_SERVER=lms.example\n')
         (config_dir / 'rooms').write_text('Study\nSonos Port\n')
         out, errors = io.StringIO(), io.StringIO()
-        installer.install(ROOT, config_dir, Path(temp) / 'etc/systemd/system', [], Commands(), out, errors)
+        installer.install(ROOT, config_dir, Path(temp) / 'etc/systemd/system', [], Commands(), out, errors, lms_check=mock_lms)
         report = ('Mocked discovery: Study, Sonos Port, Kitchen\n'
                   'Existing rooms file: Study, Sonos Port\n\n'
                   'Config produced:\n' + (config_dir / 'config').read_text()
@@ -355,10 +533,31 @@ def dry_run_report():
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--pty-child':
-        base = Path(sys.argv[2])
+        base, case = Path(sys.argv[2]), sys.argv[3]
+        config_dir, unit_dir = base / 'etc/sonos-lms', base / 'etc/systemd/system'
         runner = Commands(); runner.server = 'lms.example'
-        installer.install(ROOT, base / 'etc/sonos-lms', base / 'etc/systemd/system',
-                          sys.argv[3:], runner)
+        if case != 'first':
+            config_dir.mkdir(parents=True)
+            (config_dir / 'config').write_text(installer.LMS_COMMENT + 'LMS_SERVER=lms.example\n' + installer.ROOM_HEADER +
+                                             'room.Kitchen=no\nroom.Sonos Port=yes\nroom.Study=yes\n')
+            (config_dir / 'installed-build').write_text(installer.build_identity(ROOT, runner)[1])
+            unit_dir.mkdir(parents=True)
+            (unit_dir / 'sonos-lms@.service').write_text((ROOT / 'packaging/sonos-lms@.service').read_text())
+            runner.active = {r'sonos-lms@Sonos\x20Port.service', 'sonos-lms@Study.service'}
+            runner.enabled = set(runner.active)
+        if case in ('new', 'yes'):
+            runner.build = 'build-b'
+            runner.rooms += 'MBR\n'
+        runner.details = ('Study\tPlay:1\t192.0.2.1\tStudy\tStudy,Sonos Port\n'
+                          'Sonos Port\tPort\t192.0.2.2\tStudy\tStudy,Sonos Port\n'
+                          'Kitchen\t-\t192.0.2.3\tKitchen\tKitchen\n')
+        if case in ('new', 'yes'):
+            runner.details += 'MBR\tOne\t192.0.2.4\tMBR\tMBR\n'
+        installer.install(ROOT, config_dir, unit_dir, ['--yes'] if case == 'yes' else [],
+                          runner, lms_check=mock_lms)
+        if case == 'same': assert not runner.actions(), runner.actions()
+        if case in ('new', 'yes'):
+            assert len([a for a in runner.actions() if a[1] == 'restart']) == 2
         print('Resulting config:')
         print((base / 'etc/sonos-lms/config').read_text(), end='')
         raise SystemExit(0)
