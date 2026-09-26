@@ -72,7 +72,7 @@ rather than what has merely been decoded.
 
 ```sh
 sudo apt-get install -y --no-install-recommends \
-    make cmake g++ libz-dev libssl-dev libflac++-dev libpulse-dev \
+    make cmake g++ python3 libz-dev libssl-dev libflac++-dev libpulse-dev \
     libasound-dev libvorbis-dev libfaad-dev libmad0-dev libmpg123-dev libsoxr-dev
 
 git clone --recursive https://github.com/ThaYapeMan/sonos-lms.git
@@ -91,7 +91,8 @@ sonos-lms --room="Living Room" [--ip=<sonos-ip>] [--server=<lms-host>]
 
 | Flag | Meaning |
 | --- | --- |
-| `--room=<name>` | Required. The Sonos room/zone to take over. |
+| `--list-rooms` | Print sorted, unique room names, including group members, then exit. Uses `SONOS_LMS_UPNP` and honours `--ip`. |
+| `--room=<name>` | Required except with `--list-rooms`. The Sonos room/zone to take over. |
 | `--ip=<address>` | Skip Sonos auto-discovery and talk to this player directly (any player in the household will do -- they share topology). Needed if discovery can't reach the Sonos network. |
 | `--server=<host>` | LMS hostname or IP **only**, not a web-UI port. Precedence: explicit `--server` > `LMS_SERVER=` in `/etc/sonos-lms/config` > automatic UDP broadcast discovery on port 3483 (same subnet only; does not cross routers). |
 | `--debug` | Raise noson's own logging verbosity. |
@@ -123,38 +124,38 @@ Taking over "Living Room" (MAC 34:7E:5C:1A:90:20) ... connected to LMS
 
 ### Installing room services
 
-Run from the deployment checkout at `/opt/sonos-lms`, with root privileges
-for the installer (or `make install`). First deployment:
+From the deployment checkout at `/opt/sonos-lms` (the installer needs root and
+Python 3), discover the speakers, edit the config, then apply it:
 
 ```sh
 make
-sudo scripts/install-devices.sh "Room One" "Room Two"
+sudo make install
+sudoedit /etc/sonos-lms/config
+sudo make install
 ```
 
-The LMS address is optional. Add `--server=<lms-host>` when broadcast discovery
-cannot reach LMS, for example across VLANs. This saves the override in
-`/etc/sonos-lms/config`:
+Example config:
 
 ```ini
-# Optional LMS override
 LMS_SERVER=<host>
+# Sonos rooms found on the network.
+# yes = bridge this room to LMS, no = ignore it.
+room.Study=yes
+room.Sonos Port=yes
+room.Kitchen=no
 ```
 
-Edit this file by hand at any time and restart the affected services, or set it
-with `scripts/install-devices.sh --server=...`. Omitting the option preserves an
-existing override; remove or empty `LMS_SERVER=` to return to discovery. If startup
-finds no server, squeezelite still retries its own discovery for core playback;
-metadata and Sonos-app pause/play relay need a resolved server and a restart.
+New speakers are added as `no`; existing values and offline speakers' lines are
+kept. Set a room to `yes` and run `make install` to enable/start it (or restart it
+if already running). To remove a room's bridge, set it to `no` and run `make install`
+to stop and disable its service. If discovery fails, configured rooms are still
+applied. An old `/etc/sonos-lms/rooms` file is migrated once to enabled settings
+and renamed `rooms.migrated`.
 
-Rooms are remembered in `/etc/sonos-lms/rooms`, one per line. Quote names
-containing spaces; the installer handles systemd escaping. Subsequent updates,
-with root privileges for `make install`:
-
-```sh
-git pull && make && make install
-```
-
-Only listed rooms are enabled/started or restarted; unrelated units are untouched.
+`LMS_SERVER` is optional: omit or empty it for automatic LMS discovery.
+`scripts/install-devices.sh --server=<host>` still saves this override; quoted room
+arguments, such as `scripts/install-devices.sh "Sonos Port"`, set those rooms to
+`yes`. Existing comments and unrelated settings are preserved.
 
 ## Testing
 
